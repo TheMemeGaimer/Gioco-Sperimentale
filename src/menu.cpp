@@ -7,11 +7,22 @@
 #include <mmsystem.h>
 #include <fstream>
 #include <filesystem>
+#include <cstdint>
+#include <limits>
+#include <cstring>
 
 #pragma comment(lib, "winmm.lib")
 
 using namespace std;
 namespace fs = std::filesystem;
+
+// prevent windows.h macro collisions with std::min/std::max
+#undef max
+#undef min
+
+// Profile file format
+static const char PROFILE_MAGIC[4] = { 'V','G','C','1' };
+static const uint32_t PROFILE_VERSION = 2;
 
 const int WIDTH = 80;
 const int HEIGHT = 25;
@@ -37,7 +48,7 @@ struct Achievement {
     string name;
     string description;
     bool unlocked = false;
-    int difficulty; 
+    int difficulty;
     // 0 = facile
     // 1 = medio
     // 2 = difficile
@@ -106,11 +117,11 @@ void achievementPopup(const string& name) {
 }
 
 void addAchievement(string name, string description, int difficulty) {
-    achievements.push_back({name, description, false, difficulty});
+    achievements.push_back({ name, description, false, difficulty });
 }
 
 void unlockAchievement(const string& name) {
-    for (auto &a : achievements) {
+    for (auto& a : achievements) {
         if (a.name == name && !a.unlocked) {
             a.unlocked = true;
             achievementPopup(a.name);
@@ -160,7 +171,9 @@ void initAchievements() {
 // ------------------------------------------------------------
 void ensureProfilesDir() {
     if (!fs::exists("profiles")) {
-        fs::create_directory("profiles");
+        std::error_code ec;
+        fs::create_directory("profiles", ec);
+        // ignore error but do not throw
     }
 }
 
@@ -170,11 +183,16 @@ string profilePath(const string& name) {
 
 bool saveCurrentProfile() {
     if (g_playerName.empty()) return false;
-
     ofstream out(profilePath(g_playerName), ios::binary);
     if (!out) return false;
 
-    size_t len = g_playerName.size();
+    // write magic + version
+    out.write(PROFILE_MAGIC, sizeof(PROFILE_MAGIC));
+    uint32_t ver = PROFILE_VERSION;
+    out.write((char*)&ver, sizeof(ver));
+
+    // write name (uint32_t length)
+    uint32_t len = static_cast<uint32_t>(g_playerName.size());
     out.write((char*)&len, sizeof(len));
     out.write(g_playerName.c_str(), len);
 
@@ -183,8 +201,10 @@ bool saveCurrentProfile() {
     out.write((char*)&g_vittorieConsecutive, sizeof(int));
     out.write((char*)&g_musicOn, sizeof(bool));
 
-    // stato achievements
-    for (auto &a : achievements) {
+    // achievements: write count then states
+    uint32_t achCount = static_cast<uint32_t>(achievements.size());
+    out.write((char*)&achCount, sizeof(achCount));
+    for (auto& a : achievements) {
         out.write((char*)&a.unlocked, sizeof(bool));
     }
 
@@ -201,38 +221,95 @@ bool saveCurrentProfile() {
 bool loadProfile(const string& name) {
     ifstream in(profilePath(name), ios::binary);
     if (!in) return false;
-
-    size_t len;
-    in.read((char*)&len, sizeof(len));
-
-    g_playerName.resize(len);
-    in.read(&g_playerName[0], len);
-
-    in.read((char*)&g_migliorTempo, sizeof(int));
-    in.read((char*)&g_migliorTentativi, sizeof(int));
-    in.read((char*)&g_vittorieConsecutive, sizeof(int));
-    in.read((char*)&g_musicOn, sizeof(bool));
-
-    for (auto &a : achievements) {
-        bool state = false;
-        if (!in.read((char*)&state, sizeof(bool))) break;
-        a.unlocked = state;
+    // try to read magic first
+    char magic[4];
+    if (!in.read(magic, sizeof(magic))) {
+        in.close();
+        return false;
     }
 
-    // prova a leggere i nuovi record (se il file è vecchio, metti default)
-    if (in.read((char*)&g_snakeBestScore, sizeof(int))) {
-        in.read((char*)&g_snakeBestDifficulty, sizeof(int));
-        in.read((char*)&g_dodgeBestTime, sizeof(int));
-        in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
-    } else {
-        g_snakeBestScore = 0;
-        g_snakeBestDifficulty = 0;
-        g_dodgeBestTime = 0;
-        g_dodgeBestDifficulty = 0;
-    }
+    if (memcmp(magic, PROFILE_MAGIC, sizeof(magic)) == 0) {
+        // new format
+        uint32_t ver = 0;
+        if (!in.read((char*)&ver, sizeof(ver))) { in.close(); return false; }
 
-    in.close();
-    return true;
+        uint32_t len = 0;
+        if (!in.read((char*)&len, sizeof(len))) { in.close(); return false; }
+        g_playerName.resize(len);
+        if (!in.read(&g_playerName[0], len)) { in.close(); return false; }
+
+        in.read((char*)&g_migliorTempo, sizeof(int));
+        in.read((char*)&g_migliorTentativi, sizeof(int));
+        in.read((char*)&g_vittorieConsecutive, sizeof(int));
+        in.read((char*)&g_musicOn, sizeof(bool));
+
+        uint32_t achCount = 0;
+        if (!in.read((char*)&achCount, sizeof(achCount))) achCount = 0;
+
+        for (uint32_t i = 0; i < achCount; ++i) {
+            bool state = false;
+            if (!in.read((char*)&state, sizeof(bool))) break;
+            if (i < achievements.size()) achievements[i].unlocked = state;
+        }
+
+        // if file has fewer achievements than current, ensure others are false
+        for (size_t i = achCount; i < achievements.size(); ++i) achievements[i].unlocked = false;
+
+        // read new game records
+        if (!in.read((char*)&g_snakeBestScore, sizeof(int))) {
+            g_snakeBestScore = 0;
+            g_snakeBestDifficulty = 0;
+            g_dodgeBestTime = 0;
+            g_dodgeBestDifficulty = 0;
+        }
+        else {
+            in.read((char*)&g_snakeBestDifficulty, sizeof(int));
+            in.read((char*)&g_dodgeBestTime, sizeof(int));
+            in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
+        }
+
+        in.close();
+        return true;
+    }
+    else {
+        // legacy format: reset to start and parse old layout
+        in.clear();
+        in.seekg(0, ios::beg);
+
+        size_t len = 0;
+        in.read((char*)&len, sizeof(len));
+        if (!in) { in.close(); return false; }
+
+        g_playerName.resize(len);
+        in.read(&g_playerName[0], len);
+
+        in.read((char*)&g_migliorTempo, sizeof(int));
+        in.read((char*)&g_migliorTentativi, sizeof(int));
+        in.read((char*)&g_vittorieConsecutive, sizeof(int));
+        in.read((char*)&g_musicOn, sizeof(bool));
+
+        for (auto& a : achievements) {
+            bool state = false;
+            if (!in.read((char*)&state, sizeof(bool))) break;
+            a.unlocked = state;
+        }
+
+        // try to read the newer records (if present)
+        if (in.read((char*)&g_snakeBestScore, sizeof(int))) {
+            in.read((char*)&g_snakeBestDifficulty, sizeof(int));
+            in.read((char*)&g_dodgeBestTime, sizeof(int));
+            in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
+        }
+        else {
+            g_snakeBestScore = 0;
+            g_snakeBestDifficulty = 0;
+            g_dodgeBestTime = 0;
+            g_dodgeBestDifficulty = 0;
+        }
+
+        in.close();
+        return true;
+    }
 }
 
 vector<string> listProfiles() {
@@ -256,9 +333,24 @@ vector<string> listProfiles() {
 void hideCursor() {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_CURSOR_INFO cursorInfo;
-    GetConsoleCursorInfo(out, &cursorInfo);
-    cursorInfo.bVisible = FALSE;
-    SetConsoleCursorInfo(out, &cursorInfo);
+    if (GetConsoleCursorInfo(out, &cursorInfo)) {
+        cursorInfo.bVisible = FALSE;
+        SetConsoleCursorInfo(out, &cursorInfo);
+    }
+}
+
+// Prompt helper that keeps asking until a valid integer is entered
+int promptInt(const string& prompt) {
+    while (true) {
+        cout << prompt;
+        int v;
+        if (cin >> v) {
+            return v;
+        }
+        cout << "Input non valido. Riprova.\n";
+        cin.clear();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    }
 }
 
 void slowPrint(string text, int delay = 30) {
@@ -284,8 +376,14 @@ void blinkText(string text, int times = 3, int delay = 200) {
 
 void startBackgroundMusic() {
     if (g_musicOn) {
-        PlaySound(TEXT("music.wav"), NULL, SND_FILENAME | SND_LOOP | SND_ASYNC);
-        unlockAchievement("Sound of the Matrix");
+        std::error_code ec;
+        if (fs::exists("music.wav", ec)) {
+            PlaySound(TEXT("music.wav"), NULL, SND_FILENAME | SND_LOOP | SND_ASYNC);
+            unlockAchievement("Sound of the Matrix");
+        }
+        else {
+            // silent fail if no music file
+        }
     }
 }
 
@@ -311,7 +409,8 @@ void transitionGlitch() {
                 if (rand() % 3 == 0) {
                     setColor(15);
                     cout << (char)(33 + rand() % 94);
-                } else {
+                }
+                else {
                     cout << " ";
                 }
             }
@@ -353,11 +452,18 @@ void transitionMatrixDissolve() {
         for (int x = 0; x < WIDTH; x++) {
             gotoXY(x, y);
             CHAR_INFO ci;
+            // ensure ci is zeroed
+            memset(&ci, 0, sizeof(ci));
             SMALL_RECT rect = { (SHORT)x, (SHORT)y, (SHORT)x, (SHORT)y };
             COORD bufSize = { 1, 1 };
             COORD bufCoord = { 0, 0 };
-            ReadConsoleOutput(GetStdHandle(STD_OUTPUT_HANDLE), &ci, bufSize, bufCoord, &rect);
-            screen[y][x] = ci.Char.AsciiChar;
+            BOOL ok = ReadConsoleOutput(GetStdHandle(STD_OUTPUT_HANDLE), &ci, bufSize, bufCoord, &rect);
+            if (ok) {
+                screen[y][x] = ci.Char.AsciiChar;
+            }
+            else {
+                screen[y][x] = ' ';
+            }
         }
     }
 
@@ -443,10 +549,12 @@ void matrixRainPro(int durationMs = 3000) {
                 if (y == h) {
                     setColor(10);
                     cout << (char)(33 + rand() % 94);
-                } else if (y < h && y > h - 6) {
+                }
+                else if (y < h && y > h - 6) {
                     setColor(2);
                     cout << (char)(33 + rand() % 94);
-                } else {
+                }
+                else {
                     cout << " ";
                 }
             }
@@ -456,7 +564,7 @@ void matrixRainPro(int durationMs = 3000) {
         for (int i = 0; i < cols; i++) {
             headY[i] += speed[i];
             if (headY[i] - 6 > HEIGHT + rand() % 10) {
-                headY[i] = - (rand() % HEIGHT);
+                headY[i] = -(rand() % HEIGHT);
                 speed[i] = 1 + rand() % 3;
             }
         }
@@ -517,14 +625,14 @@ void exportAchievementsTxt() {
 
     int total = achievements.size();
     int unlockedCount = 0;
-    for (auto &a : achievements) if (a.unlocked) unlockedCount++;
+    for (auto& a : achievements) if (a.unlocked) unlockedCount++;
 
     out << "VALENTINO GAME COLLECTION - ACHIEVEMENTS\n\n";
     out << "Profilo: " << g_playerName << "\n";
-    out << "Progress: " << unlockedCount << " / " << total << " (" 
+    out << "Progress: " << unlockedCount << " / " << total << " ("
         << (total ? (unlockedCount * 100 / total) : 0) << "%)\n\n";
 
-    for (auto &a : achievements) {
+    for (auto& a : achievements) {
         out << (a.unlocked ? "[UNLOCKED] " : "[LOCKED]   ");
         out << a.name << " - " << a.description << "\n";
     }
@@ -540,11 +648,11 @@ void showAchievements() {
 
     int total = achievements.size();
     int unlockedCount = 0;
-    for (auto &a : achievements) if (a.unlocked) unlockedCount++;
+    for (auto& a : achievements) if (a.unlocked) unlockedCount++;
 
     cout << "Profilo: " << g_playerName << "\n";
     cout << "Progress: " << unlockedCount << " / " << total << " ("
-         << (total ? (unlockedCount * 100 / total) : 0) << "%)\n\n";
+        << (total ? (unlockedCount * 100 / total) : 0) << "%)\n\n";
 
     for (int d = 0; d <= 3; d++) {
         if (d == 0) { setColor(10); cout << "[FACILI]\n"; }
@@ -553,13 +661,14 @@ void showAchievements() {
         if (d == 3) { setColor(13); cout << "\n[SEGRETI]\n"; }
         setColor(7);
 
-        for (auto &a : achievements) {
+        for (auto& a : achievements) {
             if (a.difficulty != d) continue;
 
             if (a.unlocked) {
                 setColor(14);
                 cout << "[✓] " << a.name << " - " << a.description << "\n";
-            } else {
+            }
+            else {
                 setColor(8);
                 cout << "[ ] " << a.name << "\n";
             }
@@ -630,7 +739,8 @@ int scegliDifficolta() {
             if (i == selected) {
                 setColor(10);
                 cout << "> " << options[i] << "\n";
-            } else {
+            }
+            else {
                 setColor(7);
                 cout << "  " << options[i] << "\n";
             }
@@ -647,12 +757,14 @@ int scegliDifficolta() {
             if (selected < 0) selected = numOptions - 1;
             Beep(700, 60);
             Sleep(150);
-        } else if ((down & 0x8000) || (sKey & 0x8000)) {
+        }
+        else if ((down & 0x8000) || (sKey & 0x8000)) {
             selected++;
             if (selected >= numOptions) selected = 0;
             Beep(500, 60);
             Sleep(150);
-        } else if (enterKey & 0x8000) {
+        }
+        else if (enterKey & 0x8000) {
             if (selected == 3) return 0; // torna indietro
             return selected + 1; // 1..3
         }
@@ -723,12 +835,14 @@ int giochiMenu() {
             if (selected < 0) selected = numOptions - 1;
             Beep(700, 60);
             Sleep(150);
-        } else if ((down & 0x8000) || (sKey & 0x8000)) {
+        }
+        else if ((down & 0x8000) || (sKey & 0x8000)) {
             selected++;
             if (selected >= numOptions) selected = 0;
             Beep(500, 60);
             Sleep(150);
-        } else if (enterKey & 0x8000) {
+        }
+        else if (enterKey & 0x8000) {
             if (selected == 3) return 0; // torna al menu
             return selected + 1; // 1..3
         }
@@ -741,13 +855,13 @@ int giochiMenu() {
 // MENU PRINCIPALE
 // ------------------------------------------------------------
 int matrixMenu(const string& nomeUtente,
-               int migliorTempo,
-               int migliorTentativi,
-               bool easterNeo,
-               bool easterTrinity,
-               bool easterMorpheus,
-               bool easterValentino,
-               bool easterArchitect) {
+    int migliorTempo,
+    int migliorTentativi,
+    bool easterNeo,
+    bool easterTrinity,
+    bool easterMorpheus,
+    bool easterValentino,
+    bool easterArchitect) {
 
     const int numOptions = 5;
     string options[numOptions] = {
@@ -840,7 +954,8 @@ int matrixMenu(const string& nomeUtente,
             if (i == selected) {
                 setColor(menuGlitch ? 15 : 10);
                 cout << "> [" << options[i] << "]           ";
-            } else {
+            }
+            else {
                 setColor(7);
                 cout << "  " << options[i] << "              ";
             }
@@ -947,12 +1062,14 @@ int matrixMenu(const string& nomeUtente,
             if (selected < 0) selected = numOptions - 1;
             Beep(700, 60);
             Sleep(150);
-        } else if ((down & 0x8000) || (sKey & 0x8000)) {
+        }
+        else if ((down & 0x8000) || (sKey & 0x8000)) {
             selected++;
             if (selected >= numOptions) selected = 0;
             Beep(500, 60);
             Sleep(150);
-        } else if (enterKey & 0x8000) {
+        }
+        else if (enterKey & 0x8000) {
             playTransition(4, nomeUtente);
             system("cls");
             return selected + 1;
@@ -987,17 +1104,17 @@ void miniGiocoIndovina(const string& nomeUtente, int difficolta) {
     int maxRange;
 
     switch (difficolta) {
-        case 1: maxRange = 20; break;
-        case 2: maxRange = 50; break;
-        case 3: maxRange = 100; break;
-        default:
-            setColor(12);
-            cout << "Difficolta non valida, imposto difficolta media.\n";
-            Beep(400, 300);
-            setColor(7);
-            maxRange = 50;
-            difficolta = 2;
-            break;
+    case 1: maxRange = 20; break;
+    case 2: maxRange = 50; break;
+    case 3: maxRange = 100; break;
+    default:
+        setColor(12);
+        cout << "Difficolta non valida, imposto difficolta media.\n";
+        Beep(400, 300);
+        setColor(7);
+        maxRange = 50;
+        difficolta = 2;
+        break;
     }
 
     int numeroSegreto = rand() % maxRange + 1;
@@ -1010,8 +1127,18 @@ void miniGiocoIndovina(const string& nomeUtente, int difficolta) {
 
     do {
         cout << "Il tuo tentativo: ";
-        cin >> tentativo;
+        if (!(cin >> tentativo)) {
+            cout << "Input non valido. Inserisci un numero.\n";
+            cin.clear();
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            continue;
+        }
         tentativi++;
+        if (tentativo < 1 || tentativo > maxRange) {
+
+            cout << "Il numero deve essere tra 1 e " << maxRange << ".\n";
+            continue;
+        }
 
         if (tentativo > numeroSegreto) {
             setColor(12);
@@ -1100,7 +1227,7 @@ void giocoSnake(const string& nomeUtente, int difficolta) {
     else delayMs = 60;
 
     vector<SnakeSegment> snake;
-    snake.push_back({width / 2, height / 2});
+    snake.push_back({ width / 2, height / 2 });
 
     int dirX = 1, dirY = 0;
 
@@ -1137,7 +1264,7 @@ void giocoSnake(const string& nomeUtente, int difficolta) {
         }
 
         // collision with self
-        for (auto &seg : snake) {
+        for (auto& seg : snake) {
             if (seg.x == newHead.x && seg.y == newHead.y) {
                 gameOver = true;
                 break;
@@ -1158,14 +1285,15 @@ void giocoSnake(const string& nomeUtente, int difficolta) {
                 foodX = rand() % width;
                 foodY = rand() % height;
                 valid = true;
-                for (auto &seg : snake) {
+                for (auto& seg : snake) {
                     if (seg.x == foodX && seg.y == foodY) {
                         valid = false;
                         break;
                     }
                 }
             }
-        } else {
+        }
+        else {
             snake.pop_back();
         }
 
@@ -1179,20 +1307,23 @@ void giocoSnake(const string& nomeUtente, int difficolta) {
             for (int x = -1; x <= width; x++) {
                 if (y == -1 || y == height || x == -1 || x == width) {
                     cout << "#";
-                } else {
+                }
+                else {
                     bool printed = false;
                     if (x == foodX && y == foodY) {
                         setColor(12);
                         cout << "*";
                         setColor(7);
                         printed = true;
-                    } else {
+                    }
+                    else {
                         for (size_t i = 0; i < snake.size(); i++) {
                             if (snake[i].x == x && snake[i].y == y) {
                                 if (i == 0) {
                                     setColor(10);
                                     cout << "O";
-                                } else {
+                                }
+                                else {
                                     setColor(2);
                                     cout << "o";
                                 }
@@ -1232,8 +1363,8 @@ void giocoSnake(const string& nomeUtente, int difficolta) {
     if (score >= 50) unlockAchievement("Snake Master");
 
     if (!nuovoRecord) {
-        cout << "Record attuale: " << g_snakeBestScore 
-             << " (difficolta: " << difficultyName(g_snakeBestDifficulty) << ")\n";
+        cout << "Record attuale: " << g_snakeBestScore
+            << " (difficolta: " << difficultyName(g_snakeBestDifficulty) << ")\n";
     }
 
     cout << "\n";
@@ -1294,13 +1425,13 @@ void giocoDodge(const string& nomeUtente, int difficolta) {
         }
 
         // move ostacoli
-        for (auto &o : obstacles) {
+        for (auto& o : obstacles) {
             o.y++;
         }
 
         // collisioni e pulizia
         vector<Obstacle> newObs;
-        for (auto &o : obstacles) {
+        for (auto& o : obstacles) {
             if (o.y == playerY && o.x == playerX) {
                 gameOver = true;
             }
@@ -1317,8 +1448,8 @@ void giocoDodge(const string& nomeUtente, int difficolta) {
         // draw
         system("cls");
         setColor(10);
-        cout << "=== DODGE GAME ===   Giocatore: " << nomeUtente 
-             << "   Tempo: " << survivedSeconds << " s\n";
+        cout << "=== DODGE GAME ===   Giocatore: " << nomeUtente
+            << "   Tempo: " << survivedSeconds << " s\n";
         setColor(7);
 
         for (int y = 0; y < height; y++) {
@@ -1330,8 +1461,9 @@ void giocoDodge(const string& nomeUtente, int difficolta) {
                     cout << "▲";
                     setColor(7);
                     printed = true;
-                } else {
-                    for (auto &o : obstacles) {
+                }
+                else {
+                    for (auto& o : obstacles) {
                         if (o.x == x && o.y == y) {
                             setColor(12);
                             cout << "█";
@@ -1371,8 +1503,8 @@ void giocoDodge(const string& nomeUtente, int difficolta) {
     if (survivedSeconds >= 60) unlockAchievement("Untouchable");
 
     if (!nuovoRecord) {
-        cout << "Record attuale: " << g_dodgeBestTime 
-             << " s (difficolta: " << difficultyName(g_dodgeBestDifficulty) << ")\n";
+        cout << "Record attuale: " << g_dodgeBestTime
+            << " s (difficolta: " << difficultyName(g_dodgeBestDifficulty) << ")\n";
     }
 
     cout << "\n";
@@ -1423,16 +1555,15 @@ bool profileMenu() {
         cout << "Profili disponibili:\n";
         if (profiles.empty()) {
             cout << "- Nessun profilo trovato.\n\n";
-        } else {
+        }
+        else {
             for (size_t i = 0; i < profiles.size(); ++i) {
                 cout << "  " << (i + 1) << ") " << profiles[i] << "\n";
             }
             cout << "\n";
         }
 
-        cout << "Scelta: ";
-        int scelta;
-        cin >> scelta;
+        int scelta = promptInt("Scelta: ");
 
         if (scelta == 1) {
             cout << "\nInserisci il nome del nuovo profilo: ";
@@ -1459,10 +1590,8 @@ bool profileMenu() {
                 system("pause");
                 continue;
             }
-            cout << "Seleziona il numero del profilo: ";
-            int idx;
-            cin >> idx;
-            if (idx < 1 || idx > (int)profiles.size()) {
+            int idx = promptInt("Seleziona il numero del profilo: ");
+            if (idx < 1 || idx >(int)profiles.size()) {
                 cout << "Scelta non valida.\n";
                 system("pause");
                 continue;
@@ -1481,10 +1610,8 @@ bool profileMenu() {
                 system("pause");
                 continue;
             }
-            cout << "Seleziona il numero del profilo da rinominare: ";
-            int idx;
-            cin >> idx;
-            if (idx < 1 || idx > (int)profiles.size()) {
+            int idx = promptInt("Seleziona il numero del profilo da rinominare: ");
+            if (idx < 1 || idx >(int)profiles.size()) {
                 cout << "Scelta non valida.\n";
                 system("pause");
                 continue;
@@ -1493,9 +1620,10 @@ bool profileMenu() {
             cout << "Nuovo nome: ";
             string newName;
             cin >> newName;
-
-            fs::rename(profilePath(oldName), profilePath(newName));
-            cout << "Profilo rinominato.\n";
+            std::error_code ec;
+            fs::rename(profilePath(oldName), profilePath(newName), ec);
+            if (ec) cout << "Errore rinominando: " << ec.message() << "\n";
+            else cout << "Profilo rinominato.\n";
             system("pause");
         }
         else if (scelta == 4) {
@@ -1504,22 +1632,22 @@ bool profileMenu() {
                 system("pause");
                 continue;
             }
-            cout << "Seleziona il numero del profilo da eliminare: ";
-            int idx;
-            cin >> idx;
-            if (idx < 1 || idx > (int)profiles.size()) {
+            int idx = promptInt("Seleziona il numero del profilo da eliminare: ");
+            if (idx < 1 || idx >(int)profiles.size()) {
                 cout << "Scelta non valida.\n";
                 system("pause");
                 continue;
             }
             string name = profiles[idx - 1];
             cout << "Sei sicuro di voler eliminare il profilo '" << name << "'? (1 = Si, 2 = No): ";
-            int conf;
-            cin >> conf;
+            int conf = promptInt("");
             if (conf == 1) {
-                fs::remove(profilePath(name));
-                cout << "Profilo eliminato.\n";
-            } else {
+                std::error_code ec;
+                fs::remove(profilePath(name), ec);
+                if (ec) cout << "Errore eliminando: " << ec.message() << "\n";
+                else cout << "Profilo eliminato.\n";
+            }
+            else {
                 cout << "Operazione annullata.\n";
             }
             system("pause");
@@ -1571,74 +1699,76 @@ int main() {
     do {
         playTransition(4, g_playerName);
         scelta = matrixMenu(g_playerName,
-                            g_migliorTempo,
-                            g_migliorTentativi,
-                            easterNeo,
-                            easterTrinity,
-                            easterMorpheus,
-                            easterValentino,
-                            easterArchitect);
+            g_migliorTempo,
+            g_migliorTentativi,
+            easterNeo,
+            easterTrinity,
+            easterMorpheus,
+            easterValentino,
+            easterArchitect);
 
         switch (scelta) {
 
-            case 1: // Saluta
-                playTransition(0, g_playerName);
-                setColor(10);
-                slowPrint("\nCiao " + g_playerName + "! Grande che stai imparando il C++!\n", 30);
-                setColor(7);
-                system("pause");
-                break;
+        case 1: // Saluta
+            playTransition(0, g_playerName);
+            setColor(10);
+            slowPrint("\nCiao " + g_playerName + "! Grande che stai imparando il C++!\n", 30);
+            setColor(7);
+            system("pause");
+            break;
 
-            case 2: // Mostra un numero
-                playTransition(0, g_playerName);
-                setColor(14);
-                slowPrint("\nIl numero magico di oggi è: 42\n", 30);
-                setColor(7);
-                system("pause");
-                break;
+        case 2: // Mostra un numero
+            playTransition(0, g_playerName);
+            setColor(14);
+            slowPrint("\nIl numero magico di oggi è: 42\n", 30);
+            setColor(7);
+            system("pause");
+            break;
 
-            case 3: { // Giochi
-                int sceltaGioco = giochiMenu();
-                if (sceltaGioco == 0) {
-                    // torna al menu
-                    break;
-                }
-
-                int diff = scegliDifficolta();
-                if (diff == 0) {
-                    // torna indietro
-                    break;
-                }
-
-                if (sceltaGioco == 1) {
-                    miniGiocoIndovina(g_playerName, diff);
-                } else if (sceltaGioco == 2) {
-                    giocoSnake(g_playerName, diff);
-                } else if (sceltaGioco == 3) {
-                    giocoDodge(g_playerName, diff);
-                }
+        case 3: { // Giochi
+            int sceltaGioco = giochiMenu();
+            if (sceltaGioco == 0) {
+                // torna al menu
                 break;
             }
 
-            case 4: // Achievements
-                showAchievements();
+            int diff = scegliDifficolta();
+            if (diff == 0) {
+                // torna indietro
                 break;
+            }
 
-            case 5: // Esci
-                playTransition(2, g_playerName);
-                setColor(12);
-                slowPrint("\nUscita dal programma...\n", 30);
-                setColor(7);
-                break;
+            if (sceltaGioco == 1) {
+                miniGiocoIndovina(g_playerName, diff);
+            }
+            else if (sceltaGioco == 2) {
+                giocoSnake(g_playerName, diff);
+            }
+            else if (sceltaGioco == 3) {
+                giocoDodge(g_playerName, diff);
+            }
+            break;
+        }
 
-            default:
-                playTransition(1, g_playerName);
-                setColor(12);
-                cout << "\nScelta non valida. Riprova.\n";
-                Beep(400, 250);
-                setColor(7);
-                system("pause");
-                break;
+        case 4: // Achievements
+            showAchievements();
+            break;
+
+        case 5: // Esci
+            playTransition(2, g_playerName);
+            setColor(12);
+            slowPrint("\nUscita dal programma...\n", 30);
+            setColor(7);
+            break;
+
+        default:
+            playTransition(1, g_playerName);
+            setColor(12);
+            cout << "\nScelta non valida. Riprova.\n";
+            Beep(400, 250);
+            setColor(7);
+            system("pause");
+            break;
         }
 
         saveCurrentProfile();
