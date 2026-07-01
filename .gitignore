@@ -1,0 +1,10 @@
+gioco
+gioco.exe
+profiles/
+backend/vgc.db
+.vgc_installed
+__pycache__/
+*.pyc
+*.pyo
+/tmp/vgc_*.json
+launch.sh

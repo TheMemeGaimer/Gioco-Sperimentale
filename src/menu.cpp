@@ -1,123 +1,301 @@
+// ============================================================
+// VALENTINO GAME COLLECTION - Cross-Platform Edition
+// Funziona su Windows, Linux e macOS
+// Backend online: profili con email e password
+// ============================================================
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
-#include <windows.h>
 #include <string>
 #include <vector>
-#include <mmsystem.h>
 #include <fstream>
 #include <filesystem>
 #include <cstdint>
 #include <limits>
 #include <cstring>
+#include <chrono>
+#include <thread>
+#include <algorithm>
+#include <sstream>
 
-#pragma comment(lib, "winmm.lib")
+#ifdef _WIN32
+  #include <windows.h>
+  #include <conio.h>
+  #define CLEAR_SCREEN() system("cls")
+  #define PLATFORM_SLEEP(ms) Sleep(ms)
+  #define KEY_UP_CODE    72
+  #define KEY_DOWN_CODE  80
+  #define KEY_LEFT_CODE  75
+  #define KEY_RIGHT_CODE 77
+#else
+  #include <termios.h>
+  #include <unistd.h>
+  #include <sys/select.h>
+  #define CLEAR_SCREEN() printf("\033[2J\033[H"); fflush(stdout)
+  #define PLATFORM_SLEEP(ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms))
+  #define KEY_UP_CODE    1001
+  #define KEY_DOWN_CODE  1002
+  #define KEY_LEFT_CODE  1003
+  #define KEY_RIGHT_CODE 1004
+#endif
 
 using namespace std;
 namespace fs = std::filesystem;
 
-// prevent windows.h macro collisions with std::min/std::max
-#undef max
-#undef min
+// ============================================================
+// TERMINALE - Gestione cross-platform
+// ============================================================
+#ifndef _WIN32
+static struct termios g_origTermios;
+static bool g_rawMode = false;
 
-// Profile file format
-static const char PROFILE_MAGIC[4] = { 'V','G','C','1' };
-static const uint32_t PROFILE_VERSION = 2;
+void enableRawMode() {
+    if (g_rawMode) return;
+    tcgetattr(STDIN_FILENO, &g_origTermios);
+    struct termios raw = g_origTermios;
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    g_rawMode = true;
+}
 
-const int WIDTH = 80;
-const int HEIGHT = 25;
+void disableRawMode() {
+    if (!g_rawMode) return;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_origTermios);
+    g_rawMode = false;
+}
 
-int g_speedBoost = 0;
-bool g_musicOn = true;
+int platformReadKey() {
+    struct timeval tv = {0, 15000};
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    if (select(1, &fds, nullptr, nullptr, &tv) <= 0) return 0;
 
-string g_playerName;
-int g_migliorTempo = 9999;
-int g_migliorTentativi = 9999;
-int g_vittorieConsecutive = 0;
+    unsigned char buf[4] = {0};
+    int n = read(STDIN_FILENO, buf, sizeof(buf));
+    if (n <= 0) return 0;
 
-// RECORD NUOVI PER GIOCHI
-int g_snakeBestScore = 0;
-int g_snakeBestDifficulty = 0;   // 1=Facile,2=Medio,3=Difficile
-int g_dodgeBestTime = 0;         // in secondi
-int g_dodgeBestDifficulty = 0;
+    if (n >= 3 && buf[0] == 27 && buf[1] == '[') {
+        switch (buf[2]) {
+            case 'A': return KEY_UP_CODE;
+            case 'B': return KEY_DOWN_CODE;
+            case 'C': return KEY_RIGHT_CODE;
+            case 'D': return KEY_LEFT_CODE;
+        }
+    }
+    if (n == 1) {
+        if (buf[0] == 27) {
+            struct timeval tv2 = {0, 50000};
+            fd_set fds2;
+            FD_ZERO(&fds2);
+            FD_SET(STDIN_FILENO, &fds2);
+            if (select(1, &fds2, nullptr, nullptr, &tv2) > 0) {
+                unsigned char seq[3] = {0};
+                int m = read(STDIN_FILENO, seq, sizeof(seq));
+                if (m >= 2 && seq[0] == '[') {
+                    switch(seq[1]) {
+                        case 'A': return KEY_UP_CODE;
+                        case 'B': return KEY_DOWN_CODE;
+                        case 'C': return KEY_RIGHT_CODE;
+                        case 'D': return KEY_LEFT_CODE;
+                    }
+                }
+            }
+            return 27;
+        }
+        return buf[0];
+    }
+    return buf[0];
+}
 
-// ------------------------------------------------------------
-// SISTEMA ACHIEVEMENTS AVANZATO
-// ------------------------------------------------------------
-struct Achievement {
-    string name;
-    string description;
-    bool unlocked = false;
-    int difficulty;
-    // 0 = facile
-    // 1 = medio
-    // 2 = difficile
-    // 3 = segreto
-};
+bool platformKbhit() {
+    struct timeval tv = {0, 0};
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    return select(1, &fds, nullptr, nullptr, &tv) > 0;
+}
+#else
+int platformReadKey() {
+    if (!_kbhit()) return 0;
+    int c = _getch();
+    if (c == 0 || c == 224) {
+        int c2 = _getch();
+        switch (c2) {
+            case 72: return KEY_UP_CODE;
+            case 80: return KEY_DOWN_CODE;
+            case 75: return KEY_LEFT_CODE;
+            case 77: return KEY_RIGHT_CODE;
+        }
+        return 0;
+    }
+    return c;
+}
+bool platformKbhit() { return _kbhit() != 0; }
+void enableRawMode() {}
+void disableRawMode() {}
+#endif
 
-vector<Achievement> achievements;
+void hideCursor() {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_CURSOR_INFO ci;
+    if (GetConsoleCursorInfo(out, &ci)) { ci.bVisible = FALSE; SetConsoleCursorInfo(out, &ci); }
+#else
+    printf("\033[?25l"); fflush(stdout);
+#endif
+}
+
+void showCursor() {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_CURSOR_INFO ci;
+    if (GetConsoleCursorInfo(out, &ci)) { ci.bVisible = TRUE; SetConsoleCursorInfo(out, &ci); }
+#else
+    printf("\033[?25h"); fflush(stdout);
+#endif
+}
 
 void setColor(int color) {
+#ifdef _WIN32
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), color);
+#else
+    const char* codes[] = {
+        "\033[0;30m", "\033[0;34m", "\033[0;32m", "\033[0;36m",
+        "\033[0;31m", "\033[0;35m", "\033[0;33m", "\033[0;37m",
+        "\033[0;90m", "\033[0;94m", "\033[0;92m", "\033[0;96m",
+        "\033[0;91m", "\033[0;95m", "\033[0;93m", "\033[0;97m"
+    };
+    if (color >= 0 && color < 16) printf("%s", codes[color]);
+#endif
+}
+
+void resetColor() {
+#ifdef _WIN32
+    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), 7);
+#else
+    printf("\033[0m");
+#endif
 }
 
 void gotoXY(int x, int y) {
-    COORD c;
-    c.X = x;
-    c.Y = y;
+#ifdef _WIN32
+    COORD c; c.X = x; c.Y = y;
     SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), c);
+#else
+    printf("\033[%d;%dH", y + 1, x + 1); fflush(stdout);
+#endif
+}
+
+uint64_t getTickMs() {
+    return (uint64_t)chrono::duration_cast<chrono::milliseconds>(
+        chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+void waitKey(const string& msg = "Premi INVIO per continuare...") {
+#ifndef _WIN32
+    bool was = g_rawMode;
+    if (was) disableRawMode();
+#endif
+    cout << msg << flush;
+    string line;
+    getline(cin, line);
+#ifndef _WIN32
+    if (was) enableRawMode();
+#endif
+    cout << "\n";
+}
+
+void slowPrint(const string& text, int delayMs = 30) {
+    for (char c : text) {
+        cout << c << flush;
+        PLATFORM_SLEEP(delayMs);
+    }
+}
+
+// ============================================================
+// STATO GLOBALE
+// ============================================================
+const int WIDTH  = 80;
+const int HEIGHT = 25;
+
+string g_playerName;
+string g_authToken;
+bool   g_onlineMode = false;
+string g_backendUrl = "http://localhost:8000";
+
+int  g_migliorTempo        = 9999;
+int  g_migliorTentativi    = 9999;
+int  g_vittorieConsecutive = 0;
+bool g_musicOn             = false;
+
+int g_snakeBestScore       = 0;
+int g_snakeBestDifficulty  = 0;
+int g_dodgeBestTime        = 0;
+int g_dodgeBestDifficulty  = 0;
+
+// ============================================================
+// ACHIEVEMENTS
+// ============================================================
+struct Achievement {
+    string name;
+    string description;
+    bool   unlocked = false;
+    int    difficulty;
+};
+vector<Achievement> achievements;
+
+void addAchievement(const string& name, const string& desc, int diff) {
+    achievements.push_back({name, desc, false, diff});
+}
+
+void initAchievements() {
+    achievements.clear();
+    addAchievement("THE ONE",             "Hai effettuato l'accesso come Neo.",           0);
+    addAchievement("Connection Est.",     "Hai effettuato l'accesso come Trinity.",        0);
+    addAchievement("Free Your Mind",      "Hai effettuato l'accesso come Morpheus.",       0);
+    addAchievement("Dev God Mode",        "Il creatore e' entrato nel sistema.",           0);
+    addAchievement("The Architect",       "Hai effettuato l'accesso come Architect.",      0);
+    addAchievement("Red Awakening",       "Hai scelto la pillola rossa.",                  0);
+    addAchievement("Blue Dream",          "Hai scelto la pillola blu.",                    0);
+    addAchievement("First Login",         "Hai effettuato il primo accesso online.",       0);
+    addAchievement("Deja-vu",            "Hai visto il gatto due volte.",                 1);
+    addAchievement("Secret Door",         "Hai aperto la stanza segreta.",                 1);
+    addAchievement("System Error",        "Hai trovato il codice 404 nascosto.",           1);
+    addAchievement("Speedrunner",         "Hai vinto il mini-gioco in meno di 5 secondi.",2);
+    addAchievement("Perfect Guess",       "Hai indovinato al primo tentativo.",            2);
+    addAchievement("Hardcore Mode",       "Hai vinto in difficolta' massima.",             2);
+    addAchievement("Persistence",         "Hai vinto tre volte di fila.",                  2);
+    addAchievement("Snake Rookie",        "Hai raggiunto 10 punti in Snake.",              0);
+    addAchievement("Snake Survivor",      "Hai raggiunto 30 punti in Snake.",              1);
+    addAchievement("Snake Master",        "Hai raggiunto 50 punti in Snake.",              2);
+    addAchievement("Dodger",              "Sopravvissuto 20 secondi in Dodge.",            0);
+    addAchievement("Ultra Dodger",        "Sopravvissuto 40 secondi in Dodge.",            1);
+    addAchievement("Untouchable",         "Sopravvissuto 60 secondi in Dodge.",            2);
+    addAchievement("Cloud Saver",         "Hai salvato il profilo online.",                0);
 }
 
 void achievementPopup(const string& name) {
-    for (int i = 0; i < 8; i++) {
-        system("cls");
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                if (rand() % 4 == 0)
-                    cout << (char)(33 + rand() % 94);
-                else
-                    cout << " ";
-            }
-            cout << "\n";
-        }
-        Beep(900 + rand() % 400, 20);
-        Sleep(40);
-    }
-
-    system("cls");
-
+    disableRawMode();
+    CLEAR_SCREEN();
     setColor(14);
-    gotoXY(20, 10);
-    cout << "=== ACHIEVEMENT UNLOCKED ===";
-
+    cout << "\n";
+    cout << "  ╔══════════════════════════════════════╗\n";
+    cout << "  ║      ACHIEVEMENT UNLOCKED!           ║\n";
+    cout << "  ║                                      ║\n";
     setColor(10);
-    gotoXY(25, 12);
-    cout << name;
-
-    Beep(1200, 150);
-    Beep(1500, 150);
-    Sleep(800);
-
-    for (int step = 0; step < HEIGHT; step++) {
-        system("cls");
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                if (y < step)
-                    cout << " ";
-                else
-                    cout << (char)(33 + rand() % 94);
-            }
-            cout << "\n";
-        }
-        Sleep(20);
-    }
-
-    system("cls");
-    setColor(7);
-}
-
-void addAchievement(string name, string description, int difficulty) {
-    achievements.push_back({ name, description, false, difficulty });
+    // center the name
+    int pad = max(0, (int)(36 - (int)name.size()) / 2);
+    cout << "  ║" << string(pad, ' ') << name << string(36 - pad - (int)name.size(), ' ') << "║\n";
+    setColor(14);
+    cout << "  ║                                      ║\n";
+    cout << "  ╚══════════════════════════════════════╝\n";
+    resetColor();
+    PLATFORM_SLEEP(1800);
+    CLEAR_SCREEN();
 }
 
 void unlockAchievement(const string& name) {
@@ -129,266 +307,463 @@ void unlockAchievement(const string& name) {
     }
 }
 
-void initAchievements() {
-    achievements.clear();
-
-    // Facili (0)
-    addAchievement("THE ONE", "Hai effettuato l'accesso come Neo.", 0);
-    addAchievement("Connection Established", "Hai effettuato l'accesso come Trinity.", 0);
-    addAchievement("Free Your Mind", "Hai effettuato l'accesso come Morpheus.", 0);
-    addAchievement("Dev God Mode", "Il creatore e' entrato nel sistema.", 0);
-    addAchievement("The Architect", "Hai effettuato l'accesso come Architect.", 0);
-    addAchievement("Sound of the Matrix", "Hai attivato la musica di sottofondo.", 0);
-    addAchievement("Red Awakening", "Hai scelto la pillola rossa.", 0);
-    addAchievement("Blue Dream", "Hai scelto la pillola blu.", 0);
-
-    // Medi (1)
-    addAchievement("Déjà-vu", "Hai visto il gatto due volte.", 1);
-    addAchievement("Secret Door", "Hai aperto la stanza segreta.", 1);
-    addAchievement("System Error", "Hai trovato il codice 404 nascosto.", 1);
-
-    // Difficili (2)
-    addAchievement("Speedrunner", "Hai vinto il mini-gioco in meno di 5 secondi.", 2);
-    addAchievement("Perfect Guess", "Hai indovinato al primo tentativo.", 2);
-    addAchievement("Hardcore Mode", "Hai vinto in difficolta' massima.", 2);
-    addAchievement("Persistence", "Hai vinto tre volte di fila.", 2);
-
-    // SNAKE
-    addAchievement("Snake Rookie", "Hai raggiunto 10 punti in Snake.", 0);
-    addAchievement("Snake Survivor", "Hai raggiunto 30 punti in Snake.", 1);
-    addAchievement("Snake Master", "Hai raggiunto 50 punti in Snake.", 2);
-
-    // DODGE GAME
-    addAchievement("Dodger", "Hai sopravvissuto 20 secondi in Dodge Game.", 0);
-    addAchievement("Ultra Dodger", "Hai sopravvissuto 40 secondi in Dodge Game.", 1);
-    addAchievement("Untouchable", "Hai sopravvissuto 60 secondi in Dodge Game.", 2);
-
-    // Segreti (3) - spazio per aggiungerne altri
+// ============================================================
+// HTTP UTILS (tramite curl a riga di comando)
+// ============================================================
+string httpPost(const string& url, const string& json, const string& token = "") {
+    string tmp = "/tmp/vgc_resp.json";
+    string cmd = "curl -s -m 5 -X POST -H \"Content-Type: application/json\"";
+    if (!token.empty())
+        cmd += " -H \"Authorization: Bearer " + token + "\"";
+    // escape single quotes in json
+    string safe = json;
+    cmd += " -d '" + safe + "'";
+    cmd += " \"" + url + "\" > " + tmp + " 2>/dev/null";
+    system(cmd.c_str());
+    ifstream f(tmp);
+    return string((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
 }
 
-// ------------------------------------------------------------
-// SALVATAGGIO PROFILO
-// ------------------------------------------------------------
+string httpGet(const string& url, const string& token = "") {
+    string tmp = "/tmp/vgc_resp.json";
+    string cmd = "curl -s -m 5";
+    if (!token.empty())
+        cmd += " -H \"Authorization: Bearer " + token + "\"";
+    cmd += " \"" + url + "\" > " + tmp + " 2>/dev/null";
+    system(cmd.c_str());
+    ifstream f(tmp);
+    return string((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
+}
+
+// Estrae valore stringa da JSON grezzo (senza libreria esterna)
+string jsonStr(const string& json, const string& key) {
+    string search = "\"" + key + "\":\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return "";
+    pos += search.size();
+    size_t end = json.find('"', pos);
+    if (end == string::npos) return "";
+    return json.substr(pos, end - pos);
+}
+
+bool jsonBool(const string& json, const string& key) {
+    string search = "\"" + key + "\":";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return false;
+    pos += search.size();
+    return json.substr(pos, 4) == "true";
+}
+
+int jsonInt(const string& json, const string& key) {
+    string search = "\"" + key + "\":";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return 0;
+    pos += search.size();
+    size_t end = json.find_first_of(",}]", pos);
+    if (end == string::npos) return 0;
+    try { return stoi(json.substr(pos, end - pos)); }
+    catch (...) { return 0; }
+}
+
+bool backendAvailable() {
+    string resp = httpGet(g_backendUrl + "/api/ping");
+    return resp.find("ok") != string::npos;
+}
+
+// ============================================================
+// PROFILO - Salvataggio locale e online
+// ============================================================
 void ensureProfilesDir() {
     if (!fs::exists("profiles")) {
-        std::error_code ec;
+        error_code ec;
         fs::create_directory("profiles", ec);
-        // ignore error but do not throw
     }
 }
 
 string profilePath(const string& name) {
-    return string("profiles/") + name + ".dat";
+    return "profiles/" + name + ".dat";
 }
 
-bool saveCurrentProfile() {
+bool saveLocalProfile() {
     if (g_playerName.empty()) return false;
+    ensureProfilesDir();
     ofstream out(profilePath(g_playerName), ios::binary);
     if (!out) return false;
-
-    // write magic + version
-    out.write(PROFILE_MAGIC, sizeof(PROFILE_MAGIC));
-    uint32_t ver = PROFILE_VERSION;
-    out.write((char*)&ver, sizeof(ver));
-
-    // write name (uint32_t length)
-    uint32_t len = static_cast<uint32_t>(g_playerName.size());
-    out.write((char*)&len, sizeof(len));
+    const char MAGIC[4] = {'V','G','C','2'};
+    out.write(MAGIC, 4);
+    uint32_t len = (uint32_t)g_playerName.size();
+    out.write((char*)&len, 4);
     out.write(g_playerName.c_str(), len);
-
-    out.write((char*)&g_migliorTempo, sizeof(int));
-    out.write((char*)&g_migliorTentativi, sizeof(int));
+    out.write((char*)&g_migliorTempo,        sizeof(int));
+    out.write((char*)&g_migliorTentativi,    sizeof(int));
     out.write((char*)&g_vittorieConsecutive, sizeof(int));
-    out.write((char*)&g_musicOn, sizeof(bool));
-
-    // achievements: write count then states
-    uint32_t achCount = static_cast<uint32_t>(achievements.size());
-    out.write((char*)&achCount, sizeof(achCount));
-    for (auto& a : achievements) {
-        out.write((char*)&a.unlocked, sizeof(bool));
-    }
-
-    // nuovi record giochi
-    out.write((char*)&g_snakeBestScore, sizeof(int));
+    out.write((char*)&g_musicOn,             sizeof(bool));
+    uint32_t ac = (uint32_t)achievements.size();
+    out.write((char*)&ac, 4);
+    for (auto& a : achievements) out.write((char*)&a.unlocked, 1);
+    out.write((char*)&g_snakeBestScore,      sizeof(int));
     out.write((char*)&g_snakeBestDifficulty, sizeof(int));
-    out.write((char*)&g_dodgeBestTime, sizeof(int));
+    out.write((char*)&g_dodgeBestTime,       sizeof(int));
     out.write((char*)&g_dodgeBestDifficulty, sizeof(int));
-
     out.close();
     return true;
 }
 
-bool loadProfile(const string& name) {
+bool loadLocalProfile(const string& name) {
     ifstream in(profilePath(name), ios::binary);
     if (!in) return false;
-    // try to read magic first
     char magic[4];
-    if (!in.read(magic, sizeof(magic))) {
-        in.close();
-        return false;
+    if (!in.read(magic, 4)) return false;
+    if (memcmp(magic, "VGC2", 4) != 0 && memcmp(magic, "VGC1", 4) != 0) return false;
+    uint32_t len = 0;
+    in.read((char*)&len, 4);
+    g_playerName.resize(len);
+    in.read(&g_playerName[0], len);
+    in.read((char*)&g_migliorTempo,        sizeof(int));
+    in.read((char*)&g_migliorTentativi,    sizeof(int));
+    in.read((char*)&g_vittorieConsecutive, sizeof(int));
+    in.read((char*)&g_musicOn,             sizeof(bool));
+    uint32_t ac = 0;
+    in.read((char*)&ac, 4);
+    for (uint32_t i = 0; i < ac; i++) {
+        bool st = false;
+        in.read((char*)&st, 1);
+        if (i < achievements.size()) achievements[i].unlocked = st;
     }
-
-    if (memcmp(magic, PROFILE_MAGIC, sizeof(magic)) == 0) {
-        // new format
-        uint32_t ver = 0;
-        if (!in.read((char*)&ver, sizeof(ver))) { in.close(); return false; }
-
-        uint32_t len = 0;
-        if (!in.read((char*)&len, sizeof(len))) { in.close(); return false; }
-        g_playerName.resize(len);
-        if (!in.read(&g_playerName[0], len)) { in.close(); return false; }
-
-        in.read((char*)&g_migliorTempo, sizeof(int));
-        in.read((char*)&g_migliorTentativi, sizeof(int));
-        in.read((char*)&g_vittorieConsecutive, sizeof(int));
-        in.read((char*)&g_musicOn, sizeof(bool));
-
-        uint32_t achCount = 0;
-        if (!in.read((char*)&achCount, sizeof(achCount))) achCount = 0;
-
-        for (uint32_t i = 0; i < achCount; ++i) {
-            bool state = false;
-            if (!in.read((char*)&state, sizeof(bool))) break;
-            if (i < achievements.size()) achievements[i].unlocked = state;
-        }
-
-        // if file has fewer achievements than current, ensure others are false
-        for (size_t i = achCount; i < achievements.size(); ++i) achievements[i].unlocked = false;
-
-        // read new game records
-        if (!in.read((char*)&g_snakeBestScore, sizeof(int))) {
-            g_snakeBestScore = 0;
-            g_snakeBestDifficulty = 0;
-            g_dodgeBestTime = 0;
-            g_dodgeBestDifficulty = 0;
-        }
-        else {
-            in.read((char*)&g_snakeBestDifficulty, sizeof(int));
-            in.read((char*)&g_dodgeBestTime, sizeof(int));
-            in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
-        }
-
-        in.close();
-        return true;
-    }
-    else {
-        // legacy format: reset to start and parse old layout
-        in.clear();
-        in.seekg(0, ios::beg);
-
-        size_t len = 0;
-        in.read((char*)&len, sizeof(len));
-        if (!in) { in.close(); return false; }
-
-        g_playerName.resize(len);
-        in.read(&g_playerName[0], len);
-
-        in.read((char*)&g_migliorTempo, sizeof(int));
-        in.read((char*)&g_migliorTentativi, sizeof(int));
-        in.read((char*)&g_vittorieConsecutive, sizeof(int));
-        in.read((char*)&g_musicOn, sizeof(bool));
-
-        for (auto& a : achievements) {
-            bool state = false;
-            if (!in.read((char*)&state, sizeof(bool))) break;
-            a.unlocked = state;
-        }
-
-        // try to read the newer records (if present)
-        if (in.read((char*)&g_snakeBestScore, sizeof(int))) {
-            in.read((char*)&g_snakeBestDifficulty, sizeof(int));
-            in.read((char*)&g_dodgeBestTime, sizeof(int));
-            in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
-        }
-        else {
-            g_snakeBestScore = 0;
-            g_snakeBestDifficulty = 0;
-            g_dodgeBestTime = 0;
-            g_dodgeBestDifficulty = 0;
-        }
-
-        in.close();
-        return true;
-    }
+    in.read((char*)&g_snakeBestScore,      sizeof(int));
+    in.read((char*)&g_snakeBestDifficulty, sizeof(int));
+    in.read((char*)&g_dodgeBestTime,       sizeof(int));
+    in.read((char*)&g_dodgeBestDifficulty, sizeof(int));
+    return true;
 }
 
-vector<string> listProfiles() {
+vector<string> listLocalProfiles() {
     vector<string> names;
     if (!fs::exists("profiles")) return names;
-
-    for (auto& entry : fs::directory_iterator("profiles")) {
-        if (entry.is_regular_file()) {
-            auto p = entry.path();
-            if (p.extension() == ".dat") {
-                names.push_back(p.stem().string());
-            }
-        }
+    for (auto& e : fs::directory_iterator("profiles")) {
+        if (e.is_regular_file() && e.path().extension() == ".dat")
+            names.push_back(e.path().stem().string());
     }
     return names;
 }
 
-// ------------------------------------------------------------
-// UTILITY
-// ------------------------------------------------------------
-void hideCursor() {
-    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_CURSOR_INFO cursorInfo;
-    if (GetConsoleCursorInfo(out, &cursorInfo)) {
-        cursorInfo.bVisible = FALSE;
-        SetConsoleCursorInfo(out, &cursorInfo);
+// Costruisce JSON del profilo corrente
+string buildProfileJson() {
+    string j = "{";
+    j += "\"playerName\":\"" + g_playerName + "\",";
+    j += "\"migliorTempo\":" + to_string(g_migliorTempo) + ",";
+    j += "\"migliorTentativi\":" + to_string(g_migliorTentativi) + ",";
+    j += "\"vittorieConsecutive\":" + to_string(g_vittorieConsecutive) + ",";
+    j += "\"musicOn\":" + string(g_musicOn ? "true" : "false") + ",";
+    j += "\"snakeBestScore\":" + to_string(g_snakeBestScore) + ",";
+    j += "\"snakeBestDifficulty\":" + to_string(g_snakeBestDifficulty) + ",";
+    j += "\"dodgeBestTime\":" + to_string(g_dodgeBestTime) + ",";
+    j += "\"dodgeBestDifficulty\":" + to_string(g_dodgeBestDifficulty) + ",";
+    j += "\"achievements\":[";
+    for (size_t i = 0; i < achievements.size(); i++) {
+        j += achievements[i].unlocked ? "true" : "false";
+        if (i + 1 < achievements.size()) j += ",";
     }
+    j += "]}";
+    return j;
 }
 
-// Prompt helper that keeps asking until a valid integer is entered
-int promptInt(const string& prompt) {
-    while (true) {
-        cout << prompt;
-        int v;
-        if (cin >> v) {
-            return v;
+bool saveOnlineProfile() {
+    if (g_authToken.empty()) return false;
+    string json = buildProfileJson();
+    string resp = httpPost(g_backendUrl + "/api/profile", json, g_authToken);
+    return jsonBool(resp, "success");
+}
+
+bool loadOnlineProfile() {
+    if (g_authToken.empty()) return false;
+    string resp = httpGet(g_backendUrl + "/api/profile", g_authToken);
+    if (!jsonBool(resp, "success")) return false;
+
+    size_t pp = resp.find("\"profile\":");
+    if (pp == string::npos) return false;
+    string profilePart = resp.substr(pp + 10);
+
+    int t = jsonInt(profilePart, "migliorTempo");
+    if (t > 0) g_migliorTempo = t;
+    int te = jsonInt(profilePart, "migliorTentativi");
+    if (te > 0) g_migliorTentativi = te;
+    g_vittorieConsecutive = jsonInt(profilePart, "vittorieConsecutive");
+    g_snakeBestScore      = jsonInt(profilePart, "snakeBestScore");
+    g_snakeBestDifficulty = jsonInt(profilePart, "snakeBestDifficulty");
+    g_dodgeBestTime       = jsonInt(profilePart, "dodgeBestTime");
+    g_dodgeBestDifficulty = jsonInt(profilePart, "dodgeBestDifficulty");
+
+    // Parse achievements array
+    size_t ap = profilePart.find("\"achievements\":[");
+    if (ap != string::npos) {
+        ap += 16;
+        for (size_t i = 0; i < achievements.size(); i++) {
+            size_t end = profilePart.find_first_of(",]", ap);
+            if (end == string::npos) break;
+            string val = profilePart.substr(ap, end - ap);
+            achievements[i].unlocked = (val == "true");
+            ap = end + 1;
         }
-        cout << "Input non valido. Riprova.\n";
-        cin.clear();
-        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    }
+    return true;
+}
+
+void saveProfile() {
+    saveLocalProfile();
+    if (g_onlineMode) {
+        if (saveOnlineProfile())
+            unlockAchievement("Cloud Saver");
     }
 }
 
-void slowPrint(string text, int delay = 30) {
-    for (char c : text) {
-        cout << c;
-        Sleep(delay);
-    }
-}
-
-void blinkText(string text, int times = 3, int delay = 200) {
-    for (int i = 0; i < times; i++) {
-        setColor(14);
-        cout << text;
-        Sleep(delay);
-        cout << "\r";
-        setColor(7);
-        cout << string(text.size(), ' ');
-        cout << "\r";
-        Sleep(delay);
-    }
-    cout << text << "\n";
-}
-
-void startBackgroundMusic() {
-    if (g_musicOn) {
-        std::error_code ec;
-        if (fs::exists("music.wav", ec)) {
-            PlaySound(TEXT("music.wav"), NULL, SND_FILENAME | SND_LOOP | SND_ASYNC);
-            unlockAchievement("Sound of the Matrix");
+// ============================================================
+// EFFETTI VISIVI
+// ============================================================
+void transitionGlitch() {
+    srand((unsigned)time(nullptr));
+    for (int i = 0; i < 8; i++) {
+        CLEAR_SCREEN();
+        setColor(15);
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                if (rand() % 3 == 0) cout << (char)(33 + rand() % 94);
+                else cout << ' ';
+            }
+            cout << '\n';
         }
-        else {
-            // silent fail if no music file
-        }
+        PLATFORM_SLEEP(40);
     }
+    resetColor();
+    CLEAR_SCREEN();
 }
 
-void stopBackgroundMusic() {
-    PlaySound(NULL, 0, 0);
+void transitionCRT() {
+    for (int step = 0; step < WIDTH / 2; step++) {
+        CLEAR_SCREEN();
+        for (int y = 0; y < HEIGHT; y++) {
+            cout << string(step, ' ');
+            for (int x = step; x < WIDTH - step; x++) cout << ' ';
+            cout << '\n';
+        }
+        PLATFORM_SLEEP(12);
+    }
+    CLEAR_SCREEN();
+    for (int y = 0; y < HEIGHT; y++) {
+        gotoXY(WIDTH / 2, y);
+        setColor(10);
+        cout << '|';
+    }
+    PLATFORM_SLEEP(200);
+    resetColor();
+    CLEAR_SCREEN();
+}
+
+void transitionDissolve() {
+    for (int step = 0; step < HEIGHT; step++) {
+        CLEAR_SCREEN();
+        setColor(2);
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                if (y >= step) cout << (char)(33 + rand() % 94);
+                else cout << ' ';
+            }
+            cout << '\n';
+        }
+        PLATFORM_SLEEP(18);
+    }
+    resetColor();
+    CLEAR_SCREEN();
+}
+
+void playTransition(int mode, const string& name = "") {
+    if (mode == 4) {
+        if (name == "Neo")       { transitionDissolve(); return; }
+        if (name == "Trinity")   { transitionGlitch();   return; }
+        if (name == "Morpheus")  { transitionCRT();      return; }
+        if (name == "Valentino") { int r = rand()%3; if(r==0) transitionGlitch(); else if(r==1) transitionCRT(); else transitionDissolve(); return; }
+    }
+    if (mode == 0) { int r = rand()%3; if(r==0) transitionGlitch(); else if(r==1) transitionCRT(); else transitionDissolve(); return; }
+    if (mode == 1) transitionGlitch();
+    if (mode == 2) transitionCRT();
+    if (mode == 3) transitionDissolve();
+}
+
+// Matrix rain full-screen
+void matrixRainPro(int durationMs) {
+    const int cols = WIDTH;
+    int headY[80] = {};
+    int speed[80]  = {};
+    for (int i = 0; i < cols; i++) {
+        headY[i] = rand() % HEIGHT;
+        speed[i] = 1 + rand() % 3;
+    }
+    uint64_t start = getTickMs();
+    hideCursor();
+    while ((int)(getTickMs() - start) < durationMs) {
+        CLEAR_SCREEN();
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < cols; x++) {
+                int h = headY[x];
+                if (y == h) { setColor(10); cout << (char)(33 + rand()%94); }
+                else if (y < h && y > h-6) { setColor(2); cout << (char)(33+rand()%94); }
+                else cout << ' ';
+            }
+            cout << '\n';
+        }
+        for (int i = 0; i < cols; i++) {
+            headY[i] += speed[i];
+            if (headY[i] - 6 > HEIGHT + rand()%10) {
+                headY[i] = -(rand()%HEIGHT);
+                speed[i] = 1 + rand()%3;
+            }
+        }
+        PLATFORM_SLEEP(70);
+    }
+    resetColor();
+    CLEAR_SCREEN();
+    showCursor();
+}
+
+// Frame singolo della pioggia (per il menu animato)
+void matrixBgFrame(int headY[], int speed[], int w, int h) {
+    for (int x = 0; x < w; x++) {
+        int hh = headY[x];
+        bool glitch = (rand()%40 == 0);
+        if (hh >= 0 && hh < h) {
+            gotoXY(x, hh);
+            setColor(glitch ? 15 : 10);
+            cout << (char)(33 + rand()%94);
+        }
+        for (int t = 1; t < 6; t++) {
+            int y = hh - t;
+            if (y >= 0 && y < h) { gotoXY(x, y); setColor(2); cout << (char)(33+rand()%94); }
+        }
+        int tail = hh - 6;
+        if (tail >= 0 && tail < h) { gotoXY(x, tail); cout << ' '; }
+        headY[x] += speed[x];
+        if (headY[x] > h + rand()%20) {
+            headY[x] = -(rand()%h);
+            speed[x] = 1 + rand()%3;
+        }
+    }
+    resetColor();
+}
+
+// ============================================================
+// ACHIEVEMENTS SCREEN
+// ============================================================
+void showAchievements() {
+    disableRawMode();
+    CLEAR_SCREEN();
+    setColor(10);
+    cout << "========== ACHIEVEMENTS ==========\n\n";
+    resetColor();
+
+    int total = 0, unl = 0;
+    for (auto& a : achievements) { total++; if (a.unlocked) unl++; }
+    cout << "Profilo: " << g_playerName << "  |  " << unl << "/" << total
+         << " (" << (total ? unl*100/total : 0) << "%)\n\n";
+
+    const char* labels[] = {"[FACILI]", "[MEDI]", "[DIFFICILI]", "[SEGRETI]"};
+    int cols[] = {10, 14, 12, 13};
+    for (int d = 0; d <= 3; d++) {
+        setColor(cols[d]);
+        cout << labels[d] << "\n";
+        resetColor();
+        for (auto& a : achievements) {
+            if (a.difficulty != d) continue;
+            if (a.unlocked) { setColor(14); cout << " [v] " << a.name << " - " << a.description << "\n"; }
+            else            { setColor(8);  cout << " [ ] " << a.name << "\n"; }
+            resetColor();
+        }
+        cout << "\n";
+    }
+    waitKey();
+}
+
+// ============================================================
+// LEADERBOARD ONLINE
+// ============================================================
+void showLeaderboard() {
+    if (!g_onlineMode) {
+        cout << "\nLeaderboard disponibile solo in modalita' online.\n";
+        waitKey();
+        return;
+    }
+    CLEAR_SCREEN();
+    setColor(11);
+    cout << "========== LEADERBOARD ONLINE ==========\n\n";
+    resetColor();
+
+    cout << "--- TOP SNAKE ---\n";
+    string resp = httpGet(g_backendUrl + "/api/leaderboard/snake");
+    size_t lbPos = resp.find("\"leaderboard\":[");
+    if (lbPos != string::npos) {
+        string lb = resp.substr(lbPos + 15);
+        int rank = 1;
+        size_t p = 0;
+        while (p < lb.size() && lb[p] != ']' && rank <= 10) {
+            size_t us = lb.find("\"username\":\"", p);
+            size_t sc = lb.find("\"score\":", p);
+            if (us == string::npos || sc == string::npos) break;
+            us += 12;
+            size_t ue = lb.find('"', us);
+            sc += 8;
+            size_t se = lb.find_first_of(",}", sc);
+            if (ue == string::npos || se == string::npos) break;
+            string user  = lb.substr(us, ue - us);
+            string score = lb.substr(sc, se - sc);
+            cout << "  " << rank++ << ". " << user << " - " << score << " punti\n";
+            p = se;
+        }
+    }
+
+    cout << "\n--- TOP DODGE ---\n";
+    resp = httpGet(g_backendUrl + "/api/leaderboard/dodge");
+    lbPos = resp.find("\"leaderboard\":[");
+    if (lbPos != string::npos) {
+        string lb = resp.substr(lbPos + 15);
+        int rank = 1;
+        size_t p = 0;
+        while (p < lb.size() && lb[p] != ']' && rank <= 10) {
+            size_t us = lb.find("\"username\":\"", p);
+            size_t tc = lb.find("\"time\":", p);
+            if (us == string::npos || tc == string::npos) break;
+            us += 12;
+            size_t ue = lb.find('"', us);
+            tc += 7;
+            size_t te = lb.find_first_of(",}", tc);
+            if (ue == string::npos || te == string::npos) break;
+            string user = lb.substr(us, ue - us);
+            string time_s = lb.substr(tc, te - tc);
+            cout << "  " << rank++ << ". " << user << " - " << time_s << " secondi\n";
+            p = te;
+        }
+    }
+
+    cout << "\n";
+    waitKey();
+}
+
+// ============================================================
+// GIOCO BOOT
+// ============================================================
+void gameBootScreen(const string& title) {
+    disableRawMode();
+    CLEAR_SCREEN();
+    setColor(11);
+    cout << "[ " << title << " SYSTEM BOOTING ]\n";
+    resetColor();
+    PLATFORM_SLEEP(200);
+    slowPrint("Inizializzazione moduli...\n", 18);
+    PLATFORM_SLEEP(100);
+    slowPrint("Caricamento logica di gioco...\n", 18);
+    PLATFORM_SLEEP(100);
+    slowPrint("Calibrazione difficolta'...\n", 18);
+    PLATFORM_SLEEP(100);
+    slowPrint("Pronto.\n", 18);
+    PLATFORM_SLEEP(300);
 }
 
 string difficultyName(int d) {
@@ -398,1383 +773,663 @@ string difficultyName(int d) {
     return "-";
 }
 
-// ------------------------------------------------------------
-// TRANSIZIONI
-// ------------------------------------------------------------
-void transitionGlitch() {
-    for (int i = 0; i < 12; i++) {
-        system("cls");
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                if (rand() % 3 == 0) {
-                    setColor(15);
-                    cout << (char)(33 + rand() % 94);
-                }
-                else {
-                    cout << " ";
-                }
-            }
-            cout << "\n";
-        }
-        Beep(600 + rand() % 400, 20);
-        Sleep(40);
-    }
-    system("cls");
-}
-
-void transitionCRT() {
-    for (int step = 0; step < WIDTH / 2; step++) {
-        system("cls");
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = step; x < WIDTH - step; x++) {
-                cout << " ";
-            }
-            cout << "\n";
-        }
-        Sleep(15);
-    }
-
-    system("cls");
-    for (int y = 0; y < HEIGHT; y++) {
-        gotoXY(WIDTH / 2, y);
-        cout << "|";
-    }
-    Sleep(200);
-
-    system("cls");
-    Sleep(100);
-}
-
-void transitionMatrixDissolve() {
-    vector<string> screen(HEIGHT, string(WIDTH, ' '));
-
-    for (int y = 0; y < HEIGHT; y++) {
-        for (int x = 0; x < WIDTH; x++) {
-            gotoXY(x, y);
-            CHAR_INFO ci;
-            // ensure ci is zeroed
-            memset(&ci, 0, sizeof(ci));
-            SMALL_RECT rect = { (SHORT)x, (SHORT)y, (SHORT)x, (SHORT)y };
-            COORD bufSize = { 1, 1 };
-            COORD bufCoord = { 0, 0 };
-            BOOL ok = ReadConsoleOutput(GetStdHandle(STD_OUTPUT_HANDLE), &ci, bufSize, bufCoord, &rect);
-            if (ok) {
-                screen[y][x] = ci.Char.AsciiChar;
-            }
-            else {
-                screen[y][x] = ' ';
-            }
-        }
-    }
-
-    for (int step = 0; step < HEIGHT; step++) {
-        system("cls");
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                if (y < step)
-                    cout << " ";
-                else
-                    cout << screen[y][x];
-            }
-            cout << "\n";
-        }
-        Sleep(20);
-    }
-
-    system("cls");
-}
-
-void playTransition(int mode, const string& nomeUtente = "") {
-    if (mode == 4) {
-        if (nomeUtente == "Neo") {
-            transitionMatrixDissolve();
-            return;
-        }
-        if (nomeUtente == "Trinity") {
-            transitionGlitch();
-            return;
-        }
-        if (nomeUtente == "Morpheus") {
-            transitionCRT();
-            return;
-        }
-        if (nomeUtente == "Architect") {
-            transitionCRT();
-            return;
-        }
-        if (nomeUtente == "Valentino") {
-            int r = rand() % 3;
-            if (r == 0) transitionGlitch();
-            if (r == 1) transitionCRT();
-            if (r == 2) transitionMatrixDissolve();
-            return;
-        }
-    }
-
-    if (mode == 0) {
-        int r = rand() % 3;
-        if (r == 0) transitionGlitch();
-        if (r == 1) transitionCRT();
-        if (r == 2) transitionMatrixDissolve();
-        return;
-    }
-
-    if (mode == 1) transitionGlitch();
-    if (mode == 2) transitionCRT();
-    if (mode == 3) transitionMatrixDissolve();
-}
-
-// ------------------------------------------------------------
-// MATRIX RAIN
-// ------------------------------------------------------------
-void matrixRainPro(int durationMs = 3000) {
-    const int cols = WIDTH;
-    int headY[cols];
-    int speed[cols];
-
-    for (int i = 0; i < cols; i++) {
-        headY[i] = rand() % HEIGHT;
-        speed[i] = 1 + rand() % 3;
-    }
-
-    DWORD start = GetTickCount();
-
-    while (GetTickCount() - start < (DWORD)durationMs) {
-        system("cls");
-
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < cols; x++) {
-                int h = headY[x];
-
-                if (y == h) {
-                    setColor(10);
-                    cout << (char)(33 + rand() % 94);
-                }
-                else if (y < h && y > h - 6) {
-                    setColor(2);
-                    cout << (char)(33 + rand() % 94);
-                }
-                else {
-                    cout << " ";
-                }
-            }
-            cout << "\n";
-        }
-
-        for (int i = 0; i < cols; i++) {
-            headY[i] += speed[i];
-            if (headY[i] - 6 > HEIGHT + rand() % 10) {
-                headY[i] = -(rand() % HEIGHT);
-                speed[i] = 1 + rand() % 3;
-            }
-        }
-
-        Sleep(70);
-    }
-
-    setColor(7);
-    system("cls");
-}
-
-void matrixBackgroundFrame(int width, int height, int headY[], int speed[]) {
-    for (int x = 0; x < width; x++) {
-
-        bool glitch = (rand() % 40 == 0);
-
-        int h = headY[x];
-
-        if (h >= 0 && h < height) {
-            gotoXY(x, h);
-            setColor(glitch ? 15 : 10);
-            cout << (char)(33 + rand() % 94);
-        }
-
-        for (int t = 1; t < 6; t++) {
-            int y = h - t;
-            if (y >= 0 && y < height) {
-                gotoXY(x, y);
-                setColor(2);
-                cout << (char)(33 + rand() % 94);
-            }
-        }
-
-        int tail = h - 6;
-        if (tail >= 0 && tail < height) {
-            gotoXY(x, tail);
-            cout << " ";
-        }
-
-        int step = speed[x] + g_speedBoost;
-        if (step < 1) step = 1;
-        headY[x] += step;
-        if (headY[x] > height + rand() % 20) {
-            headY[x] = -(rand() % height);
-            speed[x] = 1 + rand() % 3;
-        }
-    }
-
-    setColor(7);
-}
-
-// ------------------------------------------------------------
-// SCHERMATA ACHIEVEMENTS
-// ------------------------------------------------------------
-void exportAchievementsTxt() {
-    ofstream out("achievements_export.txt");
-    if (!out) return;
-
-    int total = achievements.size();
-    int unlockedCount = 0;
-    for (auto& a : achievements) if (a.unlocked) unlockedCount++;
-
-    out << "VALENTINO GAME COLLECTION - ACHIEVEMENTS\n\n";
-    out << "Profilo: " << g_playerName << "\n";
-    out << "Progress: " << unlockedCount << " / " << total << " ("
-        << (total ? (unlockedCount * 100 / total) : 0) << "%)\n\n";
-
-    for (auto& a : achievements) {
-        out << (a.unlocked ? "[UNLOCKED] " : "[LOCKED]   ");
-        out << a.name << " - " << a.description << "\n";
-    }
-
-    out.close();
-}
-
-void showAchievements() {
-    system("cls");
-    setColor(10);
-    cout << "=== ACHIEVEMENTS ===\n\n";
-    setColor(7);
-
-    int total = achievements.size();
-    int unlockedCount = 0;
-    for (auto& a : achievements) if (a.unlocked) unlockedCount++;
-
-    cout << "Profilo: " << g_playerName << "\n";
-    cout << "Progress: " << unlockedCount << " / " << total << " ("
-        << (total ? (unlockedCount * 100 / total) : 0) << "%)\n\n";
-
-    for (int d = 0; d <= 3; d++) {
-        if (d == 0) { setColor(10); cout << "[FACILI]\n"; }
-        if (d == 1) { setColor(14); cout << "\n[MEDI]\n"; }
-        if (d == 2) { setColor(12); cout << "\n[DIFFICILI]\n"; }
-        if (d == 3) { setColor(13); cout << "\n[SEGRETI]\n"; }
-        setColor(7);
-
-        for (auto& a : achievements) {
-            if (a.difficulty != d) continue;
-
-            if (a.unlocked) {
-                setColor(14);
-                cout << "[✓] " << a.name << " - " << a.description << "\n";
-            }
-            else {
-                setColor(8);
-                cout << "[ ] " << a.name << "\n";
-            }
-            setColor(7);
-        }
-    }
-
-    cout << "\nPremi E per esportare in achievements_export.txt, oppure INVIO per tornare al menu.\n";
-    while (true) {
-        if (GetAsyncKeyState('E') & 0x8000) {
-            exportAchievementsTxt();
-            cout << "\nEsportazione completata.\n";
-            Sleep(500);
-            break;
-        }
-        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
-            break;
-        }
-        Sleep(50);
-    }
-
-    system("pause");
-}
-
-// ------------------------------------------------------------
-// ANIMAZIONE AVVIO GIOCO
-// ------------------------------------------------------------
-void gameBootScreen(const string& title) {
-    system("cls");
-    setColor(11);
-    cout << "[ " << title << " SYSTEM BOOTING ]\n";
-    setColor(7);
-    Sleep(200);
-    slowPrint("Initializing modules...\n", 20);
-    Sleep(150);
-    slowPrint("Loading core logic...\n", 20);
-    Sleep(150);
-    slowPrint("Calibrating difficulty...\n", 20);
-    Sleep(150);
-    slowPrint("Ready.\n", 20);
-    Beep(900, 120);
-    Sleep(300);
-}
-
-// ------------------------------------------------------------
-// MENU GIOCHI E DIFFICOLTA'
-// ------------------------------------------------------------
-int scegliDifficolta() {
-    int selected = 0;
-    const int numOptions = 4;
-    string options[numOptions] = {
-        "Facile",
-        "Medio",
-        "Difficile",
-        "Torna indietro"
-    };
-
-    hideCursor();
-
-    while (true) {
-        system("cls");
-        setColor(10);
-        cout << "=== SCEGLI LA DIFFICOLTA' ===\n\n";
-        setColor(7);
-        cout << "Usa W/S o Frecce per muoverti, INVIO per confermare.\n\n";
-
-        for (int i = 0; i < numOptions; i++) {
-            if (i == selected) {
-                setColor(10);
-                cout << "> " << options[i] << "\n";
-            }
-            else {
-                setColor(7);
-                cout << "  " << options[i] << "\n";
-            }
-        }
-
-        SHORT up = GetAsyncKeyState(VK_UP);
-        SHORT down = GetAsyncKeyState(VK_DOWN);
-        SHORT wKey = GetAsyncKeyState('W');
-        SHORT sKey = GetAsyncKeyState('S');
-        SHORT enterKey = GetAsyncKeyState(VK_RETURN);
-
-        if ((up & 0x8000) || (wKey & 0x8000)) {
-            selected--;
-            if (selected < 0) selected = numOptions - 1;
-            Beep(700, 60);
-            Sleep(150);
-        }
-        else if ((down & 0x8000) || (sKey & 0x8000)) {
-            selected++;
-            if (selected >= numOptions) selected = 0;
-            Beep(500, 60);
-            Sleep(150);
-        }
-        else if (enterKey & 0x8000) {
-            if (selected == 3) return 0; // torna indietro
-            return selected + 1; // 1..3
-        }
-
-        Sleep(80);
-    }
-}
-
-// ------------------------------------------------------------
-// MENU GIOCHI (HUB)
-// ------------------------------------------------------------
-int giochiMenu() {
-    int selected = 0;
-    const int numOptions = 4;
-    string options[numOptions] = {
-        "Indovina il Numero",
-        "Snake",
-        "Dodge Game",
-        "Torna al menu"
-    };
-
-    hideCursor();
-
-    while (true) {
-        system("cls");
-        setColor(10);
-        cout << "==============================\n";
-        cout << "         GIOCHI DISPONIBILI   \n";
-        cout << "==============================\n\n";
-        setColor(7);
-
-        // Indovina il Numero
-        if (selected == 0) setColor(10); else setColor(7);
-        cout << (selected == 0 ? "> " : "  ") << "Indovina il Numero\n";
-        setColor(8);
-        cout << "    Miglior tempo: " << (g_migliorTempo == 9999 ? 0 : g_migliorTempo) << " s\n";
-        cout << "    Migliori tentativi: " << (g_migliorTentativi == 9999 ? 0 : g_migliorTentativi) << "\n\n";
-
-        // Snake
-        if (selected == 1) setColor(10); else setColor(7);
-        cout << (selected == 1 ? "> " : "  ") << "Snake\n";
-        setColor(8);
-        cout << "    Record: " << g_snakeBestScore << " punti\n";
-        cout << "    Difficolta max: " << difficultyName(g_snakeBestDifficulty) << "\n\n";
-
-        // Dodge Game
-        if (selected == 2) setColor(10); else setColor(7);
-        cout << (selected == 2 ? "> " : "  ") << "Dodge Game\n";
-        setColor(8);
-        cout << "    Record: " << g_dodgeBestTime << " secondi\n";
-        cout << "    Difficolta max: " << difficultyName(g_dodgeBestDifficulty) << "\n\n";
-
-        // Torna
-        if (selected == 3) setColor(10); else setColor(7);
-        cout << (selected == 3 ? "> " : "  ") << "Torna al menu\n";
-
-        setColor(7);
-        cout << "\nUsa W/S o Frecce per muoverti, INVIO per scegliere.\n";
-
-        SHORT up = GetAsyncKeyState(VK_UP);
-        SHORT down = GetAsyncKeyState(VK_DOWN);
-        SHORT wKey = GetAsyncKeyState('W');
-        SHORT sKey = GetAsyncKeyState('S');
-        SHORT enterKey = GetAsyncKeyState(VK_RETURN);
-
-        if ((up & 0x8000) || (wKey & 0x8000)) {
-            selected--;
-            if (selected < 0) selected = numOptions - 1;
-            Beep(700, 60);
-            Sleep(150);
-        }
-        else if ((down & 0x8000) || (sKey & 0x8000)) {
-            selected++;
-            if (selected >= numOptions) selected = 0;
-            Beep(500, 60);
-            Sleep(150);
-        }
-        else if (enterKey & 0x8000) {
-            if (selected == 3) return 0; // torna al menu
-            return selected + 1; // 1..3
-        }
-
-        Sleep(80);
-    }
-}
-
-// ------------------------------------------------------------
-// MENU PRINCIPALE
-// ------------------------------------------------------------
-int matrixMenu(const string& nomeUtente,
-    int migliorTempo,
-    int migliorTentativi,
-    bool easterNeo,
-    bool easterTrinity,
-    bool easterMorpheus,
-    bool easterValentino,
-    bool easterArchitect) {
-
-    const int numOptions = 5;
-    string options[numOptions] = {
-        "Saluta",
-        "Mostra un numero",
-        "Giochi",
-        "Achievements",
-        "Esci"
-    };
-
-    int headY[WIDTH];
-    int speed[WIDTH];
-
-    for (int i = 0; i < WIDTH; i++) {
-        headY[i] = rand() % HEIGHT;
-        speed[i] = 1 + rand() % 3;
-    }
-
-    hideCursor();
-
-    int selected = 0;
-
-    string secretInput = "";
-    string codeInput = "";
-    int catCounter = 0;
-
-    while (true) {
-
-        matrixBackgroundFrame(WIDTH, HEIGHT, headY, speed);
-
-        bool menuGlitch = (rand() % 50 == 0);
-
-        int panelX = 18;
-        int panelY = 3;
-
-        setColor(0);
-        for (int y = 0; y < 16; y++) {
-            gotoXY(panelX, panelY + y);
-            cout << "                              ";
-        }
-
-        if (easterValentino) {
-            gotoXY(panelX, panelY - 2);
-            setColor(14);
-            cout << "[DEV GOD MODE ENABLED]        ";
-        }
-
-        if (easterNeo) {
-            gotoXY(panelX, panelY - 1);
-            setColor(15);
-            cout << "      THE ONE HAS LOGGED IN      ";
-        }
-
-        if (easterTrinity) {
-            gotoXY(panelX, panelY - 1);
-            setColor(11);
-            cout << "Connection established, Trinity. ";
-        }
-
-        if (easterArchitect) {
-            gotoXY(panelX - 8, panelY - 1);
-            setColor(15);
-            cout << "Welcome, Architect.                         ";
-        }
-
-        setColor(menuGlitch ? 15 : 10);
-        gotoXY(panelX, panelY);
-        cout << "==============================";
-        gotoXY(panelX, panelY + 1);
-        cout << "      VALENTINO CONSOLE      ";
-        gotoXY(panelX, panelY + 2);
-        cout << "==============================";
-
-        setColor(10);
-        gotoXY(panelX, panelY + 4);
-        cout << "Utente: " << nomeUtente << "          ";
-        setColor(7);
-        gotoXY(panelX, panelY + 5);
-        cout << "Record tempo: " << migliorTempo << " s   ";
-        gotoXY(panelX, panelY + 6);
-        cout << "Record tentativi: " << migliorTentativi << "   ";
-
-        setColor(2);
-        gotoXY(panelX, panelY + 8);
-        cout << "W/S o Frecce, INVIO per scegliere   ";
-        setColor(7);
-
-        for (int i = 0; i < numOptions; i++) {
-            gotoXY(panelX + 2, panelY + 10 + i);
-            if (i == selected) {
-                setColor(menuGlitch ? 15 : 10);
-                cout << "> [" << options[i] << "]           ";
-            }
-            else {
-                setColor(7);
-                cout << "  " << options[i] << "              ";
-            }
-        }
-
-        if (easterMorpheus && rand() % 120 == 0) {
-            gotoXY(2, HEIGHT - 2);
-            setColor(13);
-            string phrases[3] = {
-                "What is real?",
-                "Free your mind.",
-                "I can only show you the door."
-            };
-            cout << phrases[rand() % 3] << "                ";
-        }
-
-        if (rand() % 200 == 0) {
-            gotoXY(10, 12);
-            setColor(15);
-            cout << "SYSTEM BREACH DETECTED      ";
-        }
-
-        if (GetAsyncKeyState('C') & 0x8000) {
-            catCounter++;
-            Sleep(150);
-        }
-        if (catCounter >= 2) {
-            gotoXY(5, HEIGHT - 3);
-            setColor(14);
-            cout << "=^.^=  (déjà-vu?)           ";
-            catCounter = 0;
-            unlockAchievement("Déjà-vu");
-        }
-
-        if (GetAsyncKeyState('R') & 0x8000) {
-            g_speedBoost = 2;
-            gotoXY(0, 0);
-            setColor(12);
-            cout << "RED PILL: MATRIX FULL POWER        ";
-            unlockAchievement("Red Awakening");
-        }
-        if (GetAsyncKeyState('B') & 0x8000) {
-            g_speedBoost = 0;
-            gotoXY(0, 0);
-            setColor(9);
-            cout << "BLUE PILL: NORMAL MODE             ";
-            unlockAchievement("Blue Dream");
-        }
-        if (GetAsyncKeyState('G') & 0x8000) {
-            gotoXY(0, 1);
-            setColor(15);
-            cout << "!!! SYSTEM GLITCH BOOST !!!        ";
-        }
-
-        if (GetAsyncKeyState('O') & 0x8000) { secretInput += 'o'; Sleep(120); }
-        if (GetAsyncKeyState('P') & 0x8000) { secretInput += 'p'; Sleep(120); }
-        if (GetAsyncKeyState('E') & 0x8000) { secretInput += 'e'; Sleep(120); }
-        if (GetAsyncKeyState('N') & 0x8000) { secretInput += 'n'; Sleep(120); }
-        if (GetAsyncKeyState('S') & 0x8000) { secretInput += 's'; Sleep(120); }
-        if (GetAsyncKeyState('A') & 0x8000) { secretInput += 'a'; Sleep(120); }
-        if (GetAsyncKeyState('M') & 0x8000) { secretInput += 'm'; Sleep(120); }
-
-        if (secretInput.size() > 40)
-            secretInput.erase(0, secretInput.size() - 40);
-
-        if (secretInput.find("opensesame") != string::npos) {
-            unlockAchievement("Secret Door");
-            playTransition(1, nomeUtente);
-            system("cls");
-            setColor(10);
-            cout << "ACCESSO ALLA STANZA SEGRETA...\n\n";
-            Sleep(1000);
-            cout << "Qui potresti mettere un mini-gioco segreto,\n";
-            cout << "un messaggio cifrato o un codice da decifrare.\n\n";
-            system("pause");
-            secretInput.clear();
-        }
-
-        if (GetAsyncKeyState('4') & 0x8000) { codeInput += '4'; Sleep(120); }
-        if (GetAsyncKeyState('0') & 0x8000) { codeInput += '0'; Sleep(120); }
-
-        if (codeInput.size() > 10)
-            codeInput.erase(0, codeInput.size() - 10);
-
-        if (codeInput == "404") {
-            unlockAchievement("System Error");
-            playTransition(1, nomeUtente);
-            system("cls");
-            setColor(12);
-            cout << "ERROR HANDLER MODE\n\n";
-            cout << "Correggi gli errori prima che esplodano! (placeholder)\n\n";
-            system("pause");
-            codeInput.clear();
-        }
-
-        SHORT up = GetAsyncKeyState(VK_UP);
-        SHORT down = GetAsyncKeyState(VK_DOWN);
-        SHORT wKey = GetAsyncKeyState('W');
-        SHORT sKey = GetAsyncKeyState('S');
-        SHORT enterKey = GetAsyncKeyState(VK_RETURN);
-
-        if ((up & 0x8000) || (wKey & 0x8000)) {
-            selected--;
-            if (selected < 0) selected = numOptions - 1;
-            Beep(700, 60);
-            Sleep(150);
-        }
-        else if ((down & 0x8000) || (sKey & 0x8000)) {
-            selected++;
-            if (selected >= numOptions) selected = 0;
-            Beep(500, 60);
-            Sleep(150);
-        }
-        else if (enterKey & 0x8000) {
-            playTransition(4, nomeUtente);
-            system("cls");
-            return selected + 1;
-        }
-
-        Sleep(80);
-    }
-
-    return 3;
-}
-
-// ------------------------------------------------------------
-// MINI-GIOCO: INDOVINA IL NUMERO (con difficolta esterna)
-// ------------------------------------------------------------
-void miniGiocoIndovina(const string& nomeUtente, int difficolta) {
-
+// ============================================================
+// MINI-GIOCO: INDOVINA IL NUMERO
+// ============================================================
+void miniGiocoIndovina(const string& nomeUtente, int diff) {
+    disableRawMode();
     playTransition(0, nomeUtente);
-
-    system("cls");
-    cout << "\nCaricamento";
-    for (int i = 0; i < 3; i++) {
-        cout << ".";
-        Beep(600, 120);
-        Sleep(300);
-    }
-    cout << "\n\n";
-
+    CLEAR_SCREEN();
     setColor(11);
-    slowPrint("=== INDOVINA IL NUMERO ===\n", 25);
-    setColor(7);
+    cout << "=== INDOVINA IL NUMERO ===\n\n";
+    resetColor();
 
-    int maxRange;
-
-    switch (difficolta) {
-    case 1: maxRange = 20; break;
-    case 2: maxRange = 50; break;
-    case 3: maxRange = 100; break;
-    default:
-        setColor(12);
-        cout << "Difficolta non valida, imposto difficolta media.\n";
-        Beep(400, 300);
-        setColor(7);
-        maxRange = 50;
-        difficolta = 2;
-        break;
-    }
-
+    int maxRange = (diff == 1) ? 20 : (diff == 2) ? 50 : 100;
     int numeroSegreto = rand() % maxRange + 1;
-    int tentativo = 0;
     int tentativi = 0;
-
     time_t startTime = time(nullptr);
 
-    cout << "\nHo scelto un numero tra 1 e " << maxRange << ". Prova a indovinarlo!\n";
+    cout << "Ho scelto un numero tra 1 e " << maxRange << ". Indovinalo!\n\n";
 
+    int tentativo = 0;
     do {
         cout << "Il tuo tentativo: ";
         if (!(cin >> tentativo)) {
-            cout << "Input non valido. Inserisci un numero.\n";
+            cout << "Input non valido.\n";
             cin.clear();
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
             continue;
         }
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
         tentativi++;
-        if (tentativo < 1 || tentativo > maxRange) {
-
-            cout << "Il numero deve essere tra 1 e " << maxRange << ".\n";
-            continue;
-        }
-
-        if (tentativo > numeroSegreto) {
-            setColor(12);
-            cout << "Troppo alto!\n";
-            Beep(500, 150);
-            setColor(7);
-        }
-        else if (tentativo < numeroSegreto) {
-            setColor(14);
-            cout << "Troppo basso!\n";
-            Beep(500, 150);
-            setColor(7);
-        }
+        if (tentativo < 1 || tentativo > maxRange) { cout << "Numero fuori range!\n"; continue; }
+        if (tentativo > numeroSegreto)      { setColor(12); cout << "Troppo alto!\n";  resetColor(); }
+        else if (tentativo < numeroSegreto) { setColor(14); cout << "Troppo basso!\n"; resetColor(); }
         else {
-            time_t endTime = time(nullptr);
-            int durata = (int)(endTime - startTime);
-
+            int durata = (int)(time(nullptr) - startTime);
             setColor(10);
-            blinkText("\nHAI INDOVINATO!", 5, 120);
-
-            slowPrint("Bravo " + nomeUtente + "! ", 40);
-            slowPrint("Hai indovinato in ", 30);
-            cout << tentativi << " tentativi e " << durata << " secondi!\n";
-
-            Beep(900, 150);
-            Beep(1100, 150);
-            Beep(1300, 200);
-
-            bool nuovoRecord = false;
-
-            if (durata < g_migliorTempo) {
-                g_migliorTempo = durata;
-                setColor(14);
-                slowPrint("\nNuovo record di tempo! ", 40);
-                cout << "(" << durata << " secondi)\n";
-                nuovoRecord = true;
-            }
-
-            if (tentativi < g_migliorTentativi) {
-                g_migliorTentativi = tentativi;
-                setColor(14);
-                slowPrint("Nuovo record di tentativi! ", 40);
-                cout << "(" << tentativi << " tentativi)\n";
-                nuovoRecord = true;
-            }
-
-            if (!nuovoRecord) {
-                setColor(11);
-                slowPrint("\nNon hai battuto nessun record stavolta... ma ci sei andato vicino!\n", 30);
-            }
-
-            if (durata < 5) unlockAchievement("Speedrunner");
+            cout << "\nHAI INDOVINATO in " << tentativi << " tentativi e " << durata << " secondi!\n";
+            resetColor();
+            if (durata < g_migliorTempo)     { g_migliorTempo = durata;     setColor(14); cout << "Nuovo record di tempo!\n";      resetColor(); }
+            if (tentativi < g_migliorTentativi) { g_migliorTentativi = tentativi; setColor(14); cout << "Nuovo record di tentativi!\n"; resetColor(); }
+            if (durata < 5)     unlockAchievement("Speedrunner");
             if (tentativi == 1) unlockAchievement("Perfect Guess");
-            if (difficolta == 3) unlockAchievement("Hardcore Mode");
-
+            if (diff == 3)      unlockAchievement("Hardcore Mode");
             g_vittorieConsecutive++;
             if (g_vittorieConsecutive >= 3) unlockAchievement("Persistence");
-
-            setColor(7);
+            saveProfile();
         }
-
     } while (tentativo != numeroSegreto);
 
-    system("pause");
-
+    waitKey();
     playTransition(0, nomeUtente);
-    system("cls");
+    CLEAR_SCREEN();
 }
 
-// ------------------------------------------------------------
-// SNAKE
-// ------------------------------------------------------------
-struct SnakeSegment {
-    int x, y;
-};
+// ============================================================
+// GIOCO: SNAKE
+// ============================================================
+struct SnakeSeg { int x, y; };
 
-void giocoSnake(const string& nomeUtente, int difficolta) {
+void giocoSnake(const string& nomeUtente, int diff) {
     gameBootScreen("SNAKE");
-
-    const int width = 30;
-    const int height = 20;
-
-    int delayMs;
-    if (difficolta == 1) delayMs = 150;
-    else if (difficolta == 2) delayMs = 100;
-    else delayMs = 60;
-
-    vector<SnakeSegment> snake;
-    snake.push_back({ width / 2, height / 2 });
-
-    int dirX = 1, dirY = 0;
-
-    int foodX = rand() % width;
-    int foodY = rand() % height;
-
-    int score = 0;
-    bool gameOver = false;
-
+    enableRawMode();
     hideCursor();
 
-    while (!gameOver) {
-        // input
-        if (GetAsyncKeyState(VK_UP) & 0x8000 || GetAsyncKeyState('W') & 0x8000) {
-            if (dirY != 1) { dirX = 0; dirY = -1; }
-        }
-        if (GetAsyncKeyState(VK_DOWN) & 0x8000 || GetAsyncKeyState('S') & 0x8000) {
-            if (dirY != -1) { dirX = 0; dirY = 1; }
-        }
-        if (GetAsyncKeyState(VK_LEFT) & 0x8000 || GetAsyncKeyState('A') & 0x8000) {
-            if (dirX != 1) { dirX = -1; dirY = 0; }
-        }
-        if (GetAsyncKeyState(VK_RIGHT) & 0x8000 || GetAsyncKeyState('D') & 0x8000) {
-            if (dirX != -1) { dirX = 1; dirY = 0; }
-        }
+    const int W = 30, H = 20;
+    int delayMs = (diff == 1) ? 150 : (diff == 2) ? 100 : 60;
+    vector<SnakeSeg> snake;
+    snake.push_back({W/2, H/2});
+    int dirX = 1, dirY = 0;
+    int foodX = rand()%W, foodY = rand()%H;
+    int score = 0;
+    bool over = false;
 
-        // move
-        SnakeSegment head = snake.front();
-        SnakeSegment newHead = { head.x + dirX, head.y + dirY };
+    while (!over) {
+        int key = platformReadKey();
+        if (key == KEY_UP_CODE    || key == 'w' || key == 'W') { if (dirY!=1) { dirX=0; dirY=-1; } }
+        if (key == KEY_DOWN_CODE  || key == 's' || key == 'S') { if (dirY!=-1){ dirX=0; dirY=1;  } }
+        if (key == KEY_LEFT_CODE  || key == 'a' || key == 'A') { if (dirX!=1) { dirX=-1;dirY=0;  } }
+        if (key == KEY_RIGHT_CODE || key == 'd' || key == 'D') { if (dirX!=-1){ dirX=1; dirY=0;  } }
+        if (key == 'q' || key == 'Q') break;
 
-        // collision with walls
-        if (newHead.x < 0 || newHead.x >= width || newHead.y < 0 || newHead.y >= height) {
-            gameOver = true;
-        }
+        SnakeSeg head = snake.front();
+        SnakeSeg nh = {head.x+dirX, head.y+dirY};
+        if (nh.x<0||nh.x>=W||nh.y<0||nh.y>=H) over=true;
+        for (auto& s : snake) if (s.x==nh.x&&s.y==nh.y) { over=true; break; }
+        if (over) break;
 
-        // collision with self
-        for (auto& seg : snake) {
-            if (seg.x == newHead.x && seg.y == newHead.y) {
-                gameOver = true;
-                break;
-            }
-        }
-
-        if (gameOver) break;
-
-        snake.insert(snake.begin(), newHead);
-
-        // food
-        if (newHead.x == foodX && newHead.y == foodY) {
+        snake.insert(snake.begin(), nh);
+        if (nh.x==foodX && nh.y==foodY) {
             score++;
-            Beep(900, 80);
-            // new food
-            bool valid = false;
-            while (!valid) {
-                foodX = rand() % width;
-                foodY = rand() % height;
-                valid = true;
-                for (auto& seg : snake) {
-                    if (seg.x == foodX && seg.y == foodY) {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-        }
-        else {
+            bool valid=false;
+            while(!valid) { foodX=rand()%W; foodY=rand()%H; valid=true; for(auto& s:snake) if(s.x==foodX&&s.y==foodY){valid=false;break;} }
+        } else {
             snake.pop_back();
         }
 
-        // draw
-        system("cls");
-        setColor(10);
-        cout << "=== SNAKE ===   Giocatore: " << nomeUtente << "   Punteggio: " << score << "\n";
-        setColor(7);
-
-        for (int y = -1; y <= height; y++) {
-            for (int x = -1; x <= width; x++) {
-                if (y == -1 || y == height || x == -1 || x == width) {
-                    cout << "#";
-                }
-                else {
-                    bool printed = false;
-                    if (x == foodX && y == foodY) {
-                        setColor(12);
-                        cout << "*";
-                        setColor(7);
-                        printed = true;
+        CLEAR_SCREEN();
+        setColor(10); cout<<"=== SNAKE ===  Giocatore: "<<nomeUtente<<"  Punteggio: "<<score<<"  [Q=Esci]\n"; resetColor();
+        for (int y=-1; y<=H; y++) {
+            for (int x=-1; x<=W; x++) {
+                if (y==-1||y==H||x==-1||x==W) { cout<<'#'; continue; }
+                bool pr=false;
+                if (x==foodX&&y==foodY) { setColor(12); cout<<'*'; setColor(7); pr=true; }
+                else for (size_t i=0; i<snake.size(); i++) {
+                    if (snake[i].x==x&&snake[i].y==y) {
+                        setColor(i==0?10:2); cout<<(i==0?'O':'o'); resetColor(); pr=true; break;
                     }
-                    else {
-                        for (size_t i = 0; i < snake.size(); i++) {
-                            if (snake[i].x == x && snake[i].y == y) {
-                                if (i == 0) {
-                                    setColor(10);
-                                    cout << "O";
-                                }
-                                else {
-                                    setColor(2);
-                                    cout << "o";
-                                }
-                                setColor(7);
-                                printed = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!printed) cout << " ";
                 }
+                if (!pr) cout<<' ';
             }
-            cout << "\n";
+            cout<<'\n';
         }
-
-        Sleep(delayMs);
+        PLATFORM_SLEEP(delayMs);
     }
 
-    system("cls");
-    setColor(12);
-    cout << "GAME OVER!\n\n";
-    setColor(7);
-    cout << "Punteggio finale: " << score << "\n";
-
-    bool nuovoRecord = false;
+    showCursor();
+    disableRawMode();
+    CLEAR_SCREEN();
+    setColor(12); cout<<"GAME OVER!\n\n"; resetColor();
+    cout<<"Punteggio finale: "<<score<<"\n";
     if (score > g_snakeBestScore) {
-        g_snakeBestScore = score;
-        g_snakeBestDifficulty = difficolta;
-        nuovoRecord = true;
-        setColor(14);
-        cout << "Nuovo record personale in Snake!\n";
-        setColor(7);
+        g_snakeBestScore=score; g_snakeBestDifficulty=diff;
+        setColor(14); cout<<"Nuovo record personale!\n"; resetColor();
+    } else {
+        cout<<"Record attuale: "<<g_snakeBestScore<<" ("<<difficultyName(g_snakeBestDifficulty)<<")\n";
     }
-
-    if (score >= 10) unlockAchievement("Snake Rookie");
-    if (score >= 30) unlockAchievement("Snake Survivor");
-    if (score >= 50) unlockAchievement("Snake Master");
-
-    if (!nuovoRecord) {
-        cout << "Record attuale: " << g_snakeBestScore
-            << " (difficolta: " << difficultyName(g_snakeBestDifficulty) << ")\n";
-    }
-
-    cout << "\n";
-    system("pause");
+    if (score>=10) unlockAchievement("Snake Rookie");
+    if (score>=30) unlockAchievement("Snake Survivor");
+    if (score>=50) unlockAchievement("Snake Master");
+    saveProfile();
+    waitKey();
 }
 
-// ------------------------------------------------------------
-// DODGE GAME
-// ------------------------------------------------------------
-struct Obstacle {
-    int x, y;
-};
+// ============================================================
+// GIOCO: DODGE
+// ============================================================
+struct Obstacle { int x, y; };
 
-void giocoDodge(const string& nomeUtente, int difficolta) {
+void giocoDodge(const string& nomeUtente, int diff) {
     gameBootScreen("DODGE GAME");
-
-    const int width = 30;
-    const int height = 20;
-
-    int delayMs;
-    if (difficolta == 1) delayMs = 120;
-    else if (difficolta == 2) delayMs = 80;
-    else delayMs = 50;
-
-    int playerX = width / 2;
-    int playerY = height - 2;
-
-    vector<Obstacle> obstacles;
-    bool gameOver = false;
-
-    DWORD startTime = GetTickCount();
-    int survivedSeconds = 0;
-
+    enableRawMode();
     hideCursor();
 
-    while (!gameOver) {
-        // input
-        if (GetAsyncKeyState(VK_LEFT) & 0x8000 || GetAsyncKeyState('A') & 0x8000) {
-            playerX--;
-            if (playerX < 0) playerX = 0;
+    const int W=30, H=20;
+    int delayMs = (diff==1)?120:(diff==2)?80:50;
+    int playerX=W/2, playerY=H-2;
+    vector<Obstacle> obs;
+    bool over=false;
+    uint64_t startT = getTickMs();
+    int survived=0;
+
+    while (!over) {
+        int key = platformReadKey();
+        if (key==KEY_LEFT_CODE  ||key=='a'||key=='A') { playerX--; if(playerX<0) playerX=0; }
+        if (key==KEY_RIGHT_CODE ||key=='d'||key=='D') { playerX++; if(playerX>=W) playerX=W-1; }
+        if (key=='q'||key=='Q') break;
+
+        int spawnChance = (diff==1)?12:(diff==2)?8:5;
+        if (rand()%spawnChance==0) obs.push_back({rand()%W, 0});
+
+        for (auto& o : obs) o.y++;
+
+        vector<Obstacle> nobs;
+        for (auto& o : obs) {
+            if (o.y==playerY&&o.x==playerX) over=true;
+            if (o.y<H) nobs.push_back(o);
         }
-        if (GetAsyncKeyState(VK_RIGHT) & 0x8000 || GetAsyncKeyState('D') & 0x8000) {
-            playerX++;
-            if (playerX >= width) playerX = width - 1;
-        }
+        obs=nobs;
 
-        // spawn ostacoli
-        int spawnChance;
-        if (difficolta == 1) spawnChance = 12;
-        else if (difficolta == 2) spawnChance = 8;
-        else spawnChance = 5;
+        survived=(int)((getTickMs()-startT)/1000);
 
-        if (rand() % spawnChance == 0) {
-            Obstacle o;
-            o.x = rand() % width;
-            o.y = 0;
-            obstacles.push_back(o);
-        }
-
-        // move ostacoli
-        for (auto& o : obstacles) {
-            o.y++;
-        }
-
-        // collisioni e pulizia
-        vector<Obstacle> newObs;
-        for (auto& o : obstacles) {
-            if (o.y == playerY && o.x == playerX) {
-                gameOver = true;
-            }
-            if (o.y < height) {
-                newObs.push_back(o);
-            }
-        }
-        obstacles.swap(newObs);
-
-        // tempo
-        DWORD now = GetTickCount();
-        survivedSeconds = (int)((now - startTime) / 1000);
-
-        // draw
-        system("cls");
+        CLEAR_SCREEN();
         setColor(10);
-        cout << "=== DODGE GAME ===   Giocatore: " << nomeUtente
-            << "   Tempo: " << survivedSeconds << " s\n";
-        setColor(7);
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                bool printed = false;
-
-                if (y == playerY && x == playerX) {
-                    setColor(14);
-                    cout << "▲";
-                    setColor(7);
-                    printed = true;
-                }
-                else {
-                    for (auto& o : obstacles) {
-                        if (o.x == x && o.y == y) {
-                            setColor(12);
-                            cout << "█";
-                            setColor(7);
-                            printed = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (!printed) cout << " ";
+        cout<<"=== DODGE ===  Giocatore: "<<nomeUtente<<"  Tempo: "<<survived<<"s  [Q=Esci]\n";
+        resetColor();
+        for (int y=0; y<H; y++) {
+            for (int x=0; x<W; x++) {
+                bool pr=false;
+                if (y==playerY&&x==playerX) { setColor(14); cout<<'^'; resetColor(); pr=true; }
+                else for (auto& o:obs) if(o.x==x&&o.y==y) { setColor(12); cout<<'*'; resetColor(); pr=true; break; }
+                if (!pr) cout<<' ';
             }
-            cout << "\n";
+            cout<<'\n';
         }
-
-        Sleep(delayMs);
+        PLATFORM_SLEEP(delayMs);
     }
 
-    system("cls");
-    setColor(12);
-    cout << "SEI STATO COLPITO!\n\n";
-    setColor(7);
-    cout << "Tempo sopravvissuto: " << survivedSeconds << " secondi\n";
-
-    bool nuovoRecord = false;
-    if (survivedSeconds > g_dodgeBestTime) {
-        g_dodgeBestTime = survivedSeconds;
-        g_dodgeBestDifficulty = difficolta;
-        nuovoRecord = true;
-        setColor(14);
-        cout << "Nuovo record personale in Dodge Game!\n";
-        setColor(7);
+    showCursor();
+    disableRawMode();
+    CLEAR_SCREEN();
+    if (over) { setColor(12); cout<<"SEI STATO COLPITO!\n\n"; resetColor(); }
+    cout<<"Tempo sopravvissuto: "<<survived<<" secondi\n";
+    if (survived>g_dodgeBestTime) {
+        g_dodgeBestTime=survived; g_dodgeBestDifficulty=diff;
+        setColor(14); cout<<"Nuovo record personale!\n"; resetColor();
+    } else {
+        cout<<"Record attuale: "<<g_dodgeBestTime<<"s ("<<difficultyName(g_dodgeBestDifficulty)<<")\n";
     }
-
-    if (survivedSeconds >= 20) unlockAchievement("Dodger");
-    if (survivedSeconds >= 40) unlockAchievement("Ultra Dodger");
-    if (survivedSeconds >= 60) unlockAchievement("Untouchable");
-
-    if (!nuovoRecord) {
-        cout << "Record attuale: " << g_dodgeBestTime
-            << " s (difficolta: " << difficultyName(g_dodgeBestDifficulty) << ")\n";
-    }
-
-    cout << "\n";
-    system("pause");
+    if (survived>=20) unlockAchievement("Dodger");
+    if (survived>=40) unlockAchievement("Ultra Dodger");
+    if (survived>=60) unlockAchievement("Untouchable");
+    saveProfile();
+    waitKey();
 }
 
-// ------------------------------------------------------------
-// SPLASH SCREEN
-// ------------------------------------------------------------
-void splashScreen() {
-    setColor(11);
-    slowPrint("\n=====================================\n", 5);
-    Sleep(150);
-
-    setColor(10);
-    slowPrint("      VALENTINO GAME COLLECTION\n", 40);
-
-    setColor(11);
-    slowPrint("=====================================\n\n", 5);
-    setColor(7);
-
-    slowPrint("Caricamento", 40);
-    for (int i = 0; i < 5; i++) {
-        cout << ".";
-        Beep(600, 120);
-        Sleep(300);
-    }
-    cout << "\n\n";
-}
-
-// ------------------------------------------------------------
-// MENU PROFILI
-// ------------------------------------------------------------
-bool profileMenu() {
+// ============================================================
+// MENU DIFFICOLTA'
+// ============================================================
+int scegliDifficolta() {
+    enableRawMode();
+    hideCursor();
+    int sel=0;
+    string opts[]={"Facile","Medio","Difficile","Torna indietro"};
     while (true) {
-        system("cls");
-        cout << "=====================================\n";
-        cout << "           PROFILI DI GIOCO          \n";
-        cout << "=====================================\n\n";
-
-        cout << "1) Nuovo profilo\n";
-        cout << "2) Seleziona profilo\n";
-        cout << "3) Rinomina profilo\n";
-        cout << "4) Elimina profilo\n";
-        cout << "5) Esci\n\n";
-
-        auto profiles = listProfiles();
-        cout << "Profili disponibili:\n";
-        if (profiles.empty()) {
-            cout << "- Nessun profilo trovato.\n\n";
+        CLEAR_SCREEN();
+        setColor(10); cout<<"=== SCEGLI LA DIFFICOLTA' ===\n\n"; resetColor();
+        cout<<"Usa W/S o frecce, INVIO per confermare.\n\n";
+        for (int i=0; i<4; i++) {
+            if (i==sel) { setColor(10); cout<<"> "<<opts[i]<<"\n"; resetColor(); }
+            else { setColor(7); cout<<"  "<<opts[i]<<"\n"; resetColor(); }
         }
-        else {
-            for (size_t i = 0; i < profiles.size(); ++i) {
-                cout << "  " << (i + 1) << ") " << profiles[i] << "\n";
-            }
-            cout << "\n";
+        int key = platformReadKey();
+        PLATFORM_SLEEP(80);
+        if (key==KEY_UP_CODE||key=='w'||key=='W') { sel--; if(sel<0) sel=3; }
+        else if (key==KEY_DOWN_CODE||key=='s'||key=='S') { sel++; if(sel>3) sel=0; }
+        else if (key=='\n'||key=='\r'||key==13) { disableRawMode(); showCursor(); return sel+1; }
+    }
+}
+
+// ============================================================
+// INSTALLATION WIZARD (prima esecuzione)
+// ============================================================
+bool isInstalled() { return fs::exists(".vgc_installed"); }
+
+void runInstallWizard() {
+    CLEAR_SCREEN();
+    setColor(10);
+    cout << R"(
+  ██╗   ██╗ ██████╗  ██████╗
+  ██║   ██║██╔════╝ ██╔════╝
+  ██║   ██║██║  ███╗██║
+  ╚██╗ ██╔╝██║   ██║██║
+   ╚████╔╝ ╚██████╔╝╚██████╗
+    ╚═══╝   ╚═════╝  ╚═════╝
+)" << "\n";
+    setColor(11);
+    cout << "  VALENTINO GAME COLLECTION - Installer\n";
+    setColor(7);
+    cout << "  ======================================\n\n";
+    PLATFORM_SLEEP(800);
+
+    struct Step { const char* msg; int ms; };
+    Step steps[] = {
+        {"  [>>] Verifica requisiti di sistema...",   400},
+        {"  [>>] Creazione cartelle di gioco...",     300},
+        {"  [>>] Installazione core engine...",       500},
+        {"  [>>] Configurazione grafica terminale...",400},
+        {"  [>>] Caricamento sistema achievements...",300},
+        {"  [>>] Configurazione profili...",          400},
+        {"  [>>] Verifica connessione server...",     600},
+        {"  [>>] Finalizzazione installazione...",    400},
+    };
+    for (auto& s : steps) {
+        setColor(14);
+        slowPrint(string(s.msg) + "\n", 12);
+        resetColor();
+        // progress bar
+        cout << "  [";
+        for (int i=0; i<30; i++) {
+            cout << '#' << flush;
+            PLATFORM_SLEEP(s.ms / 30);
         }
+        cout << "] OK\n";
+    }
 
-        int scelta = promptInt("Scelta: ");
+    PLATFORM_SLEEP(400);
+    CLEAR_SCREEN();
+    setColor(10);
+    cout << "\n  Installazione completata!\n\n";
+    setColor(7);
+    cout << "  Benvenuto in Valentino Game Collection.\n";
+    cout << "  La tua avventura sta per iniziare...\n\n";
+    PLATFORM_SLEEP(1200);
 
-        if (scelta == 1) {
-            cout << "\nInserisci il nome del nuovo profilo: ";
-            string name;
-            cin >> name;
+    ensureProfilesDir();
+    ofstream f(".vgc_installed");
+    f << "installed";
+    f.close();
+}
 
+// ============================================================
+// AUTENTICAZIONE ONLINE
+// ============================================================
+string promptHidden(const string& label) {
+    cout << label;
+    string pw;
+#ifdef _WIN32
+    char ch;
+    while ((ch = _getch()) != '\r') {
+        if (ch == '\b') { if (!pw.empty()) { pw.pop_back(); cout << "\b \b"; } }
+        else { pw += ch; cout << '*'; }
+    }
+    cout << '\n';
+#else
+    struct termios oldt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    struct termios newt = oldt;
+    newt.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    getline(cin, pw);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    cout << '\n';
+#endif
+    return pw;
+}
+
+bool doLogin() {
+    CLEAR_SCREEN();
+    setColor(11);
+    cout << "=== LOGIN ===\n\n";
+    resetColor();
+    cout << "Email: ";
+    string email; getline(cin, email);
+    string pw = promptHidden("Password: ");
+
+    string body = "{\"email\":\""+email+"\",\"password\":\""+pw+"\"}";
+    string resp = httpPost(g_backendUrl + "/api/login", body);
+    if (!jsonBool(resp, "success")) {
+        setColor(12);
+        string msg = jsonStr(resp, "message");
+        cout << "\nErrore: " << (msg.empty() ? "impossibile connettersi al server" : msg) << "\n";
+        resetColor();
+        waitKey();
+        return false;
+    }
+    g_authToken  = jsonStr(resp, "token");
+    g_playerName = jsonStr(resp, "username");
+    setColor(10);
+    cout << "\nBenvenuto, " << g_playerName << "!\n";
+    resetColor();
+    PLATFORM_SLEEP(800);
+    unlockAchievement("First Login");
+    return true;
+}
+
+bool doRegister() {
+    CLEAR_SCREEN();
+    setColor(11);
+    cout << "=== REGISTRAZIONE ===\n\n";
+    resetColor();
+    cout << "Username: ";
+    string username; getline(cin, username);
+    cout << "Email: ";
+    string email; getline(cin, email);
+    string pw  = promptHidden("Password (min 6 caratteri): ");
+    string pw2 = promptHidden("Conferma password: ");
+    if (pw != pw2) {
+        setColor(12); cout << "\nLe password non corrispondono.\n"; resetColor();
+        waitKey(); return false;
+    }
+    string body = "{\"username\":\""+username+"\",\"email\":\""+email+"\",\"password\":\""+pw+"\"}";
+    string resp = httpPost(g_backendUrl + "/api/register", body);
+    if (!jsonBool(resp, "success")) {
+        setColor(12);
+        string msg = jsonStr(resp, "message");
+        cout << "\nErrore: " << (msg.empty() ? "impossibile connettersi al server" : msg) << "\n";
+        resetColor();
+        waitKey();
+        return false;
+    }
+    g_authToken  = jsonStr(resp, "token");
+    g_playerName = username;
+    setColor(10);
+    cout << "\nRegistrazione completata! Benvenuto, " << g_playerName << "!\n";
+    resetColor();
+    PLATFORM_SLEEP(800);
+    return true;
+}
+
+// ============================================================
+// MENU PROFILI (offline)
+// ============================================================
+bool offlineProfileMenu() {
+    while (true) {
+        CLEAR_SCREEN();
+        cout<<"=====================================\n";
+        cout<<"         PROFILI OFFLINE\n";
+        cout<<"=====================================\n\n";
+        cout<<"1) Nuovo profilo\n";
+        cout<<"2) Seleziona profilo\n";
+        cout<<"3) Elimina profilo\n";
+        cout<<"4) Torna indietro\n\n";
+        auto profs = listLocalProfiles();
+        cout<<"Profili salvati:\n";
+        if (profs.empty()) cout<<"  - Nessuno\n\n";
+        else for (size_t i=0;i<profs.size();i++) cout<<"  "<<(i+1)<<") "<<profs[i]<<"\n";
+        cout<<"\nScelta: ";
+        int c; if(!(cin>>c)){cin.clear();cin.ignore(9999,'\n');continue;} cin.ignore(9999,'\n');
+        if (c==1) {
+            cout<<"Nome: "; string name; getline(cin,name);
+            initAchievements(); g_playerName=name;
+            g_migliorTempo=9999; g_migliorTentativi=9999; g_vittorieConsecutive=0;
+            g_snakeBestScore=g_snakeBestDifficulty=g_dodgeBestTime=g_dodgeBestDifficulty=0;
+            saveLocalProfile(); return true;
+        } else if (c==2) {
+            if (profs.empty()) { cout<<"Nessun profilo.\n"; waitKey(); continue; }
+            cout<<"Numero: "; int idx; if(!(cin>>idx)){cin.clear();cin.ignore(9999,'\n');continue;} cin.ignore(9999,'\n');
+            if (idx<1||idx>(int)profs.size()) { cout<<"Non valido.\n"; waitKey(); continue; }
             initAchievements();
-            g_playerName = name;
-            g_migliorTempo = 9999;
-            g_migliorTentativi = 9999;
-            g_vittorieConsecutive = 0;
-            g_musicOn = true;
-            g_snakeBestScore = 0;
-            g_snakeBestDifficulty = 0;
-            g_dodgeBestTime = 0;
-            g_dodgeBestDifficulty = 0;
-
-            saveCurrentProfile();
+            if (!loadLocalProfile(profs[idx-1])) { cout<<"Errore caricamento.\n"; waitKey(); continue; }
             return true;
-        }
-        else if (scelta == 2) {
-            if (profiles.empty()) {
-                cout << "\nNessun profilo da selezionare.\n";
-                system("pause");
-                continue;
-            }
-            int idx = promptInt("Seleziona il numero del profilo: ");
-            if (idx < 1 || idx >(int)profiles.size()) {
-                cout << "Scelta non valida.\n";
-                system("pause");
-                continue;
-            }
-            initAchievements();
-            if (!loadProfile(profiles[idx - 1])) {
-                cout << "Errore nel caricamento del profilo.\n";
-                system("pause");
-                continue;
-            }
-            return true;
-        }
-        else if (scelta == 3) {
-            if (profiles.empty()) {
-                cout << "\nNessun profilo da rinominare.\n";
-                system("pause");
-                continue;
-            }
-            int idx = promptInt("Seleziona il numero del profilo da rinominare: ");
-            if (idx < 1 || idx >(int)profiles.size()) {
-                cout << "Scelta non valida.\n";
-                system("pause");
-                continue;
-            }
-            string oldName = profiles[idx - 1];
-            cout << "Nuovo nome: ";
-            string newName;
-            cin >> newName;
-            std::error_code ec;
-            fs::rename(profilePath(oldName), profilePath(newName), ec);
-            if (ec) cout << "Errore rinominando: " << ec.message() << "\n";
-            else cout << "Profilo rinominato.\n";
-            system("pause");
-        }
-        else if (scelta == 4) {
-            if (profiles.empty()) {
-                cout << "\nNessun profilo da eliminare.\n";
-                system("pause");
-                continue;
-            }
-            int idx = promptInt("Seleziona il numero del profilo da eliminare: ");
-            if (idx < 1 || idx >(int)profiles.size()) {
-                cout << "Scelta non valida.\n";
-                system("pause");
-                continue;
-            }
-            string name = profiles[idx - 1];
-            cout << "Sei sicuro di voler eliminare il profilo '" << name << "'? (1 = Si, 2 = No): ";
-            int conf = promptInt("");
-            if (conf == 1) {
-                std::error_code ec;
-                fs::remove(profilePath(name), ec);
-                if (ec) cout << "Errore eliminando: " << ec.message() << "\n";
-                else cout << "Profilo eliminato.\n";
-            }
-            else {
-                cout << "Operazione annullata.\n";
-            }
-            system("pause");
-        }
-        else if (scelta == 5) {
+        } else if (c==3) {
+            if (profs.empty()) { cout<<"Nessun profilo.\n"; waitKey(); continue; }
+            cout<<"Numero: "; int idx; if(!(cin>>idx)){cin.clear();cin.ignore(9999,'\n');continue;} cin.ignore(9999,'\n');
+            if (idx<1||idx>(int)profs.size()) { cout<<"Non valido.\n"; waitKey(); continue; }
+            error_code ec; fs::remove(profilePath(profs[idx-1]),ec);
+            cout<<"Eliminato.\n"; waitKey();
+        } else if (c==4) {
             return false;
         }
-        else {
-            cout << "Scelta non valida.\n";
-            system("pause");
+    }
+}
+
+// ============================================================
+// SCHERMATA DI ACCESSO PRINCIPALE
+// ============================================================
+bool accessScreen() {
+    while (true) {
+        CLEAR_SCREEN();
+        setColor(10);
+        cout << "\n  =====================================\n";
+        cout << "     VALENTINO GAME COLLECTION\n";
+        cout << "  =====================================\n\n";
+        resetColor();
+
+        bool online = g_onlineMode;
+        if (online) {
+            setColor(14);
+            cout << "  [ SERVER ONLINE DISPONIBILE ]\n\n";
+            resetColor();
+            cout << "  1) Login (email + password)\n";
+            cout << "  2) Registrati\n";
+            cout << "  3) Gioca offline\n";
+            cout << "  4) Esci\n";
+        } else {
+            setColor(8);
+            cout << "  [ SERVER OFFLINE - modalita' locale ]\n\n";
+            resetColor();
+            cout << "  1) Seleziona / crea profilo offline\n";
+            cout << "  2) Esci\n";
+        }
+
+        cout << "\n  Scelta: ";
+        int c; if(!(cin>>c)){cin.clear();cin.ignore(9999,'\n');continue;} cin.ignore(9999,'\n');
+
+        if (online) {
+            if (c==1) { if(doLogin())   { g_onlineMode=true; loadOnlineProfile(); return true; } }
+            else if (c==2) { if(doRegister()) { g_onlineMode=true; return true; } }
+            else if (c==3) { g_onlineMode=false; if(offlineProfileMenu()) return true; }
+            else if (c==4) return false;
+        } else {
+            if (c==1) { if(offlineProfileMenu()) return true; }
+            else if (c==2) return false;
         }
     }
 }
 
-// ------------------------------------------------------------
+// ============================================================
+// MENU PRINCIPALE ANIMATO
+// ============================================================
+int matrixMenu(const string& nome) {
+    enableRawMode();
+    hideCursor();
+
+    int headY[80]={}, speed[80]={};
+    for (int i=0;i<WIDTH;i++) { headY[i]=rand()%HEIGHT; speed[i]=1+rand()%3; }
+
+    string secretInput, codeInput;
+    int sel=0;
+    const int N=7;
+    string opts[N]={
+        "Indovina il numero",
+        "Snake",
+        "Dodge Game",
+        "Achievements",
+        "Leaderboard",
+        "Cambia modalita'",
+        "Esci"
+    };
+
+    CLEAR_SCREEN();
+
+    while (true) {
+        matrixBgFrame(headY, speed, WIDTH, HEIGHT);
+
+        // Menu overlay
+        gotoXY(0, 2);
+        setColor(10);
+        cout << "  =====[ VALENTINO GAME COLLECTION ]=====\n";
+        resetColor();
+        gotoXY(2, 3);
+        cout << "  Giocatore: ";
+        setColor(14); cout << nome; resetColor();
+        if (g_onlineMode) { setColor(11); cout << "  [ONLINE]"; resetColor(); }
+        else              { setColor(8);  cout << "  [OFFLINE]"; resetColor(); }
+
+        if (g_migliorTempo     < 9999) { gotoXY(2,4); cout<<"  Record Tempo: ";setColor(14);cout<<g_migliorTempo<<"s";resetColor(); }
+        if (g_migliorTentativi < 9999) { gotoXY(2,5); cout<<"  Record Tent.: ";setColor(14);cout<<g_migliorTentativi;resetColor(); }
+        if (g_snakeBestScore   >    0) { gotoXY(2,6); cout<<"  Record Snake: ";setColor(14);cout<<g_snakeBestScore;resetColor(); }
+        if (g_dodgeBestTime    >    0) { gotoXY(2,7); cout<<"  Record Dodge: ";setColor(14);cout<<g_dodgeBestTime<<"s";resetColor(); }
+
+        for (int i=0; i<N; i++) {
+            gotoXY(4, 9+i);
+            if (i==sel) { setColor(10); cout<<"> "<<opts[i]<<"   "; resetColor(); }
+            else        { setColor(7);  cout<<"  "<<opts[i]<<"   "; resetColor(); }
+        }
+        gotoXY(0, 9+N+1);
+        setColor(8); cout<<"  W/S o frecce: naviga  |  INVIO: seleziona  |  R/B: pillola"; resetColor();
+
+        int key = platformReadKey();
+        PLATFORM_SLEEP(60);
+
+        if (key==KEY_UP_CODE  ||key=='w'||key=='W') { sel--; if(sel<0) sel=N-1; }
+        else if (key==KEY_DOWN_CODE||key=='s'||key=='S') { sel++; if(sel>=N) sel=0; }
+        else if (key=='\n'||key=='\r'||key==13) {
+            disableRawMode(); showCursor();
+            playTransition(4, nome);
+            CLEAR_SCREEN();
+            return sel+1;
+        }
+        else if (key=='r'||key=='R') { unlockAchievement("Red Awakening"); }
+        else if (key=='b'||key=='B') { unlockAchievement("Blue Dream"); }
+
+        // Easter egg codici
+        if (key > 0 && key < 128) {
+            secretInput += (char)key;
+            codeInput   += (char)key;
+            if (secretInput.size() > 40) secretInput.erase(0, secretInput.size()-40);
+            if (codeInput.size()   > 10) codeInput.erase(0, codeInput.size()-10);
+        }
+        if (secretInput.find("opensesame") != string::npos) {
+            unlockAchievement("Secret Door");
+            secretInput.clear();
+        }
+        if (codeInput == "404") {
+            unlockAchievement("System Error");
+            codeInput.clear();
+        }
+    }
+}
+
+// ============================================================
 // MAIN
-// ------------------------------------------------------------
+// ============================================================
 int main() {
-    srand((unsigned)time(0));
+    srand((unsigned)time(nullptr));
+
+#ifndef _WIN32
+    // Ripristina terminale all'uscita
+    atexit([](){
+        disableRawMode();
+        showCursor();
+        printf("\033[0m\n");
+    });
+#endif
 
     ensureProfilesDir();
     initAchievements();
 
-    if (!profileMenu()) {
+    // Installazione (prima esecuzione)
+    if (!isInstalled()) {
+        runInstallWizard();
+    }
+
+    // Controlla disponibilita' backend
+    setColor(8);
+    cout << "\nConnessione al server...";
+    fflush(stdout);
+    g_onlineMode = backendAvailable();
+    if (g_onlineMode) { setColor(10); cout << " OK\n"; }
+    else              { setColor(8);  cout << " Non disponibile (modalita' offline)\n"; }
+    resetColor();
+    PLATFORM_SLEEP(600);
+
+    // Schermata di accesso
+    if (!accessScreen()) {
+        cout << "\nArrivederci!\n";
         return 0;
     }
 
-    // Easter egg sui nomi dopo scelta profilo
-    bool easterNeo = (g_playerName == "Neo");
-    bool easterTrinity = (g_playerName == "Trinity");
-    bool easterMorpheus = (g_playerName == "Morpheus");
-    bool easterValentino = (g_playerName == "Valentino");
-    bool easterArchitect = (g_playerName == "Architect");
+    // Easter egg nomi
+    bool eNeo       = (g_playerName=="Neo");
+    bool eTrinity   = (g_playerName=="Trinity");
+    bool eMorpheus  = (g_playerName=="Morpheus");
+    bool eValentino = (g_playerName=="Valentino");
+    bool eArchitect = (g_playerName=="Architect");
+    if (eNeo)       unlockAchievement("THE ONE");
+    if (eTrinity)   unlockAchievement("Connection Est.");
+    if (eMorpheus)  unlockAchievement("Free Your Mind");
+    if (eValentino) unlockAchievement("Dev God Mode");
+    if (eArchitect) unlockAchievement("The Architect");
 
-    if (easterNeo) unlockAchievement("THE ONE");
-    if (easterTrinity) unlockAchievement("Connection Established");
-    if (easterMorpheus) unlockAchievement("Free Your Mind");
-    if (easterValentino) unlockAchievement("Dev God Mode");
-    if (easterArchitect) unlockAchievement("The Architect");
+    // Intro
+    CLEAR_SCREEN();
+    setColor(10);
+    slowPrint("\n  =====================================\n", 4);
+    setColor(10); slowPrint("      VALENTINO GAME COLLECTION\n", 35);
+    setColor(10); slowPrint("  =====================================\n\n", 4);
+    resetColor();
+    slowPrint("  Caricamento", 35);
+    for (int i=0;i<5;i++) { cout<<'.'; fflush(stdout); PLATFORM_SLEEP(300); }
+    cout<<"\n\n";
 
-    startBackgroundMusic();
-
-    splashScreen();
     playTransition(0, g_playerName);
-    matrixRainPro(2500);
+    matrixRainPro(2200);
 
-    int scelta = 0;
-
+    int scelta=0;
     do {
-        playTransition(4, g_playerName);
-        scelta = matrixMenu(g_playerName,
-            g_migliorTempo,
-            g_migliorTentativi,
-            easterNeo,
-            easterTrinity,
-            easterMorpheus,
-            easterValentino,
-            easterArchitect);
+        scelta = matrixMenu(g_playerName);
 
-        switch (scelta) {
-
-        case 1: // Saluta
-            playTransition(0, g_playerName);
-            setColor(10);
-            slowPrint("\nCiao " + g_playerName + "! Grande che stai imparando il C++!\n", 30);
-            setColor(7);
-            system("pause");
-            break;
-
-        case 2: // Mostra un numero
-            playTransition(0, g_playerName);
-            setColor(14);
-            slowPrint("\nIl numero magico di oggi è: 42\n", 30);
-            setColor(7);
-            system("pause");
-            break;
-
-        case 3: { // Giochi
-            int sceltaGioco = giochiMenu();
-            if (sceltaGioco == 0) {
-                // torna al menu
-                break;
-            }
-
-            int diff = scegliDifficolta();
-            if (diff == 0) {
-                // torna indietro
-                break;
-            }
-
-            if (sceltaGioco == 1) {
-                miniGiocoIndovina(g_playerName, diff);
-            }
-            else if (sceltaGioco == 2) {
-                giocoSnake(g_playerName, diff);
-            }
-            else if (sceltaGioco == 3) {
-                giocoDodge(g_playerName, diff);
-            }
-            break;
+        if (scelta==1) {
+            int d = scegliDifficolta();
+            if (d<=3) miniGiocoIndovina(g_playerName, d);
         }
-
-        case 4: // Achievements
-            showAchievements();
-            break;
-
-        case 5: // Esci
-            playTransition(2, g_playerName);
-            setColor(12);
-            slowPrint("\nUscita dal programma...\n", 30);
-            setColor(7);
-            break;
-
-        default:
-            playTransition(1, g_playerName);
-            setColor(12);
-            cout << "\nScelta non valida. Riprova.\n";
-            Beep(400, 250);
-            setColor(7);
-            system("pause");
-            break;
+        else if (scelta==2) {
+            int d = scegliDifficolta();
+            if (d<=3) giocoSnake(g_playerName, d);
         }
+        else if (scelta==3) {
+            int d = scegliDifficolta();
+            if (d<=3) giocoDodge(g_playerName, d);
+        }
+        else if (scelta==4) { showAchievements(); }
+        else if (scelta==5) { showLeaderboard(); }
+        else if (scelta==6) {
+            if (!g_onlineMode) {
+                g_onlineMode = true;
+                cout<<"\nVerifica connessione...\n";
+                if (!backendAvailable()) {
+                    setColor(12); cout<<"Server non raggiungibile.\n"; resetColor();
+                    g_onlineMode=false;
+                } else {
+                    setColor(10); cout<<"Online! Effettua login.\n"; resetColor();
+                    if (!doLogin()) g_onlineMode=false;
+                    else { loadOnlineProfile(); }
+                }
+            } else {
+                g_onlineMode=false;
+                setColor(8); cout<<"\nModalita' offline attivata.\n"; resetColor();
+            }
+            PLATFORM_SLEEP(900);
+        }
+    } while (scelta != 7);
 
-        saveCurrentProfile();
-
-    } while (scelta != 5);
-
-    stopBackgroundMusic();
+    saveProfile();
+    CLEAR_SCREEN();
+    setColor(10);
+    cout << "\n  Progresso salvato. Arrivederci!\n\n";
+    resetColor();
     return 0;
 }

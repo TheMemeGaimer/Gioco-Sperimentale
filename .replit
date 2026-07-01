@@ -1,3 +1,4 @@
+modules = ["python-3.11"]
 [agent]
 expertMode = true
 stack = "BEST_EFFORT_FALLBACK"
@@ -17,13 +18,34 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend Server"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "g++ -std=c++17 -o gioco src/main.cpp && ./gioco"
+args = "make && ./gioco"
+
+[[workflows.workflow]]
+name = "Backend Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 backend/app.py"
+waitForPort = 8000
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+exposeLocalhost = true
