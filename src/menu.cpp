@@ -303,6 +303,8 @@ int  g_volume              = 75;
 vector<int> g_snakeHistory;
 vector<int> g_dodgeHistory;
 vector<int> g_indovinaHistory;
+vector<string> g_snakeReplay;   // ultimi frame ASCII della partita Snake
+vector<string> g_dodgeReplay;   // ultimi frame ASCII della partita Dodge
 
 void addToHistory(vector<int>& hist, int val) {
     hist.push_back(val);
@@ -957,41 +959,147 @@ void drawBarChart(const vector<int>& data, const string& unit, int color) {
     resetColor(); cout<<"\n";
 }
 
-void showStats() {
-    disableRawMode(); CLEAR_SCREEN();
-    setColor(10); cout<<tr(T_STATS_TITLE)<<"\n\n"; resetColor();
-
-    // Record migliori
-    setColor(14); cout<<tr(T_STATS_BEST_RECORDS)<<"\n"; resetColor();
-    cout<<"  Snake:  ";
-    if(g_snakeBestScore>0){setColor(11);cout<<g_snakeBestScore<<" "<<tr(T_STATS_SCORE);}
-    else{setColor(8);cout<<"---";}
-    resetColor(); cout<<"\n";
-    cout<<"  Dodge:  ";
-    if(g_dodgeBestTime>0){setColor(11);cout<<g_dodgeBestTime<<" "<<tr(T_STATS_TIME);}
-    else{setColor(8);cout<<"---";}
-    resetColor(); cout<<"\n";
-    cout<<"  Guess:  ";
-    if(g_migliorTentativi<9999){setColor(11);cout<<g_migliorTentativi<<" "<<tr(T_STATS_TRIES);}
-    else{setColor(8);cout<<"---";}
-    resetColor(); cout<<"\n\n";
-
-    // Grafico Snake
-    setColor(10); cout<<tr(T_STATS_SNAKE_HIST)<<"\n"; resetColor();
-    drawBarChart(g_snakeHistory,"p",10);
-    cout<<"\n";
-
-    // Grafico Dodge
-    setColor(13); cout<<tr(T_STATS_DODGE_HIST)<<"\n"; resetColor();
-    drawBarChart(g_dodgeHistory,"s",13);
-    cout<<"\n";
-
-    // Grafico Indovina
-    setColor(14); cout<<tr(T_STATS_INDOVINA_HIST)<<"\n"; resetColor();
-    drawBarChart(g_indovinaHistory,"t",14);
-    cout<<"\n";
-
+// ============================================================
+// REPLAY VIEWER
+// ============================================================
+void playReplay(const vector<string>& frames, const string& title) {
+    if (frames.empty()) {
+        CLEAR_SCREEN();
+        setColor(8);
+        int lang=(g_language>=0&&g_language<3)?g_language:0;
+        const char* noReplay[3]={"Nessun replay disponibile.\nGioca prima una partita!",
+                                  "No replay available.\nPlay a game first!",
+                                  "Aucun replay disponible.\nJouez d'abord une partie!"};
+        cout<<"\n  "<<noReplay[lang]<<"\n\n";
+        resetColor(); waitKey(); return;
+    }
+    disableRawMode();
+    int delayMs = 150;
+    int lang=(g_language>=0&&g_language<3)?g_language:0;
+    const char* ctrl_it = "  [+] Piu' veloce  [-] Piu' lento  [Q] Esci  [Invio] Pausa/Riprendi";
+    const char* ctrl_en = "  [+] Faster  [-] Slower  [Q] Quit  [Enter] Pause/Resume";
+    const char* ctrl_fr = "  [+] Plus vite  [-] Plus lent  [Q] Quitter  [Entree] Pause/Reprendre";
+    const char* ctrl = (lang==0)?ctrl_it:(lang==1)?ctrl_en:ctrl_fr;
+    const char* replay_lbl[3]={"REPLAY","REPLAY","REPLAY"};
+    bool paused=false;
+    size_t i=0;
+    while(i < frames.size()) {
+        CLEAR_SCREEN();
+        setColor(11);
+        cout<<"  === "<<replay_lbl[lang]<<": "<<title<<" ===  ";
+        setColor(8); cout<<"["<<(i+1)<<"/"<<frames.size()<<"]";
+        if(paused){setColor(12);cout<<"  [PAUSA]";}
+        cout<<"\n"; resetColor();
+        // Render frame with colors
+        for(char c : frames[i]) {
+            if     (c=='O'){setColor(10);cout<<c;resetColor();}
+            else if(c=='o'){setColor(2); cout<<c;resetColor();}
+            else if(c=='*'||c=='@'){setColor(12);cout<<c;resetColor();}
+            else if(c=='#'){setColor(8); cout<<c;resetColor();}
+            else if(c=='^'){setColor(14);cout<<c;resetColor();}
+            else cout<<c;
+        }
+        setColor(8); cout<<"\n"<<ctrl<<"\n"; resetColor();
+        // Wait with key polling
+        auto start=chrono::steady_clock::now();
+        bool advance=false;
+        while(!advance) {
+            auto now=chrono::steady_clock::now();
+            int elapsed=(int)chrono::duration_cast<chrono::milliseconds>(now-start).count();
+            // Check key
+#ifndef _WIN32
+            struct timeval tv={0,8000};
+            fd_set fds; FD_ZERO(&fds); FD_SET(STDIN_FILENO,&fds);
+            if(select(1,&fds,nullptr,nullptr,&tv)>0) {
+                char ch=0; ::read(STDIN_FILENO,&ch,1);
+                if(ch=='q'||ch=='Q'){showCursor();return;}
+                if(ch=='+'&&delayMs>40)  delayMs-=20;
+                if(ch=='-'&&delayMs<500) delayMs+=30;
+                if(ch=='\n'||ch=='\r')   paused=!paused;
+            }
+#else
+            if(_kbhit()){
+                int ch=_getch();
+                if(ch=='q'||ch=='Q'){showCursor();return;}
+                if(ch=='+'&&delayMs>40)  delayMs-=20;
+                if(ch=='-'&&delayMs<500) delayMs+=30;
+                if(ch=='\n'||ch=='\r')   paused=!paused;
+            }
+#endif
+            if(!paused && elapsed>=delayMs) advance=true;
+            if(!advance) PLATFORM_SLEEP(8);
+        }
+        i++;
+    }
+    // End of replay
+    CLEAR_SCREEN();
+    setColor(10);
+    int lang2=(g_language>=0&&g_language<3)?g_language:0;
+    const char* end_msg[3]={"  Fine replay!","  Replay finished!","  Fin du replay!"};
+    cout<<end_msg[lang2]<<"\n\n"; resetColor();
     waitKey();
+    showCursor();
+}
+
+void showStats() {
+    while(true) {
+        disableRawMode(); CLEAR_SCREEN();
+        setColor(10); cout<<tr(T_STATS_TITLE)<<"\n\n"; resetColor();
+
+        // Record migliori
+        setColor(14); cout<<tr(T_STATS_BEST_RECORDS)<<"\n"; resetColor();
+        cout<<"  Snake:  ";
+        if(g_snakeBestScore>0){setColor(11);cout<<g_snakeBestScore<<" "<<tr(T_STATS_SCORE);}
+        else{setColor(8);cout<<"---";}
+        resetColor(); cout<<"\n";
+        cout<<"  Dodge:  ";
+        if(g_dodgeBestTime>0){setColor(11);cout<<g_dodgeBestTime<<" "<<tr(T_STATS_TIME);}
+        else{setColor(8);cout<<"---";}
+        resetColor(); cout<<"\n";
+        cout<<"  Guess:  ";
+        if(g_migliorTentativi<9999){setColor(11);cout<<g_migliorTentativi<<" "<<tr(T_STATS_TRIES);}
+        else{setColor(8);cout<<"---";}
+        resetColor(); cout<<"\n\n";
+
+        // Grafico Snake
+        setColor(10); cout<<tr(T_STATS_SNAKE_HIST)<<"\n"; resetColor();
+        drawBarChart(g_snakeHistory,"p",10);
+        cout<<"\n";
+
+        // Grafico Dodge
+        setColor(13); cout<<tr(T_STATS_DODGE_HIST)<<"\n"; resetColor();
+        drawBarChart(g_dodgeHistory,"s",13);
+        cout<<"\n";
+
+        // Grafico Indovina
+        setColor(14); cout<<tr(T_STATS_INDOVINA_HIST)<<"\n"; resetColor();
+        drawBarChart(g_indovinaHistory,"t",14);
+        cout<<"\n";
+
+        // Opzioni replay
+        int lang=(g_language>=0&&g_language<3)?g_language:0;
+        const char* rSnake[3]={"R) Rivedi ultimo replay Snake","R) Watch last Snake replay","R) Revoir dernier replay Snake"};
+        const char* rDodge[3]={"D) Rivedi ultimo replay Dodge","D) Watch last Dodge replay","D) Revoir dernier replay Dodge"};
+        const char* rBack [3]={"Q) Esci","Q) Back","Q) Retour"};
+        setColor(11);
+        cout<<"  "<<rSnake[lang];
+        if(g_snakeReplay.empty()){setColor(8);cout<<"  (nessuna partita)";}
+        cout<<"\n";
+        setColor(13);
+        cout<<"  "<<rDodge[lang];
+        if(g_dodgeReplay.empty()){setColor(8);cout<<"  (nessuna partita)";}
+        cout<<"\n";
+        setColor(8); cout<<"  "<<rBack[lang]<<"\n"; resetColor();
+
+        cout<<"\n> " << flush;
+        string inp; getline(cin, inp);
+        if(!inp.empty()){
+            char c=toupper(inp[0]);
+            if(c=='R') playReplay(g_snakeReplay,"SNAKE");
+            else if(c=='D') playReplay(g_dodgeReplay,"DODGE");
+            else if(c=='Q') break;
+        }
+    }
 }
 
 // ============================================================
@@ -1777,6 +1885,8 @@ void giocoSnake(const string& nome, int diff) {
     vector<SnakeSeg> snake; snake.push_back({W/2,H/2});
     int dirX=1,dirY=0,foodX=rand()%W,foodY=rand()%H,score=0;
     bool over=false;
+    g_snakeReplay.clear();
+    int tick=0;
     while(!over) {
         int key=platformReadKey();
         if(key==KEY_UP_CODE   ||key=='w'||key=='W'){if(dirY!=1) {dirX=0;dirY=-1;}}
@@ -1806,6 +1916,23 @@ void giocoSnake(const string& nome, int diff) {
             }
             cout<<'\n';
         }
+        // Cattura frame per il replay ogni 4 tick (max 50 frame)
+        if(tick%4==0 && (int)g_snakeReplay.size()<50) {
+            string frame;
+            frame+="=== SNAKE ===  "+to_string(score)+"pt\n";
+            for(int fy=-1;fy<=H;fy++){
+                for(int fx=-1;fx<=W;fx++){
+                    if(fy==-1||fy==H||fx==-1||fx==W){frame+='#';continue;}
+                    bool pr=false;
+                    if(fx==foodX&&fy==foodY){frame+='*';pr=true;}
+                    else for(size_t si=0;si<snake.size();si++) if(snake[si].x==fx&&snake[si].y==fy){frame+=(si==0?'O':'o');pr=true;break;}
+                    if(!pr) frame+=' ';
+                }
+                frame+='\n';
+            }
+            g_snakeReplay.push_back(frame);
+        }
+        tick++;
         PLATFORM_SLEEP(delayMs);
     }
     showCursor(); disableRawMode(); CLEAR_SCREEN();
@@ -1828,6 +1955,8 @@ void giocoDodge(const string& nome, int diff) {
     int delayMs=(diff==1)?120:(diff==2)?80:50;
     int pX=W/2,pY=H-2; vector<Obstacle> obs; bool over=false;
     uint64_t startT=getTickMs(); int survived=0;
+    g_dodgeReplay.clear();
+    int tick=0;
     while(!over) {
         int key=platformReadKey();
         if(key==KEY_LEFT_CODE ||key=='a'||key=='A'){pX--;if(pX<0)pX=0;}
@@ -1851,6 +1980,22 @@ void giocoDodge(const string& nome, int diff) {
             }
             cout<<'\n';
         }
+        // Cattura frame per il replay ogni 4 tick (max 50 frame)
+        if(tick%4==0 && (int)g_dodgeReplay.size()<50) {
+            string frame;
+            frame+="=== DODGE ===  "+to_string(survived)+"s\n";
+            for(int fy=0;fy<H;fy++){
+                for(int fx=0;fx<W;fx++){
+                    bool pr=false;
+                    if(fy==pY&&fx==pX){frame+='^';pr=true;}
+                    else for(auto& o:obs) if(o.x==fx&&o.y==fy){frame+='*';pr=true;break;}
+                    if(!pr) frame+=' ';
+                }
+                frame+='\n';
+            }
+            g_dodgeReplay.push_back(frame);
+        }
+        tick++;
         PLATFORM_SLEEP(delayMs);
     }
     showCursor(); disableRawMode(); CLEAR_SCREEN();
