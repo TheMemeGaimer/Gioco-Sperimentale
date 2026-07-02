@@ -199,6 +199,7 @@ enum TKey {
     T_SAVE_PROFILE, T_SAVED,
     T_LANG_CHANGED,
     T_CREDITS_ROLE_FOUNDER,
+    T_TUTORIAL, T_TUTORIAL_TITLE,
     T_COUNT
 };
 
@@ -256,6 +257,8 @@ const char* TRANS[T_COUNT][3] = {
     {"Profilo salvato!",                     "Profile saved!",                     "Profil sauvegarde!"},                   // T_SAVED
     {"Lingua cambiata.",                     "Language changed.",                  "Langue modifiee."},                     // T_LANG_CHANGED
     {"Founder",                              "Founder",                            "Fondateur"},                            // T_CREDITS_ROLE_FOUNDER
+    {"Tutorial",                             "Tutorial",                           "Tutoriel"},                             // T_TUTORIAL
+    {"====== TUTORIAL ======",              "====== TUTORIAL ======",             "====== TUTORIEL ======"},               // T_TUTORIAL_TITLE
 };
 
 string tr(TKey k) {
@@ -1266,8 +1269,194 @@ void showTournaments() {
 }
 
 // ============================================================
-// IMPOSTAZIONI
+// TUTORIAL
 // ============================================================
+void showTutorial() {
+    disableRawMode();
+    int lang = (g_language>=0&&g_language<3)?g_language:0;
+
+    struct TPage {
+        const char* title[3];
+        const char* body[3];
+    };
+
+    TPage pages[] = {
+        {
+            {"BENVENUTO  (1/3)","WELCOME  (1/3)","BIENVENUE  (1/3)"},
+            {
+                "  Benvenuto in Valentino Game Collection!\n\n"
+                "  Questa guida ti mostra le basi in 3 pagine.\n"
+                "  Puoi saltarla in qualsiasi momento premendo S.\n\n"
+                "  NAVIGAZIONE NEI MENU:\n"
+                "  -----------------------------------------\n"
+                "   W / Freccia su     Sposta cursore in alto\n"
+                "   S / Freccia giu    Sposta cursore in basso\n"
+                "   INVIO              Seleziona voce\n"
+                "   ESC                Torna indietro\n"
+                "  -----------------------------------------\n\n"
+                "  Nella schermata iniziale scegli:\n"
+                "   1) Login   - se hai gia' un account\n"
+                "   2) Registrati - per creare un nuovo profilo\n"
+                "   3) Offline  - senza connessione internet\n",
+
+                "  Welcome to Valentino Game Collection!\n\n"
+                "  This guide shows you the basics in 3 pages.\n"
+                "  You can skip it at any time by pressing S.\n\n"
+                "  MENU NAVIGATION:\n"
+                "  -----------------------------------------\n"
+                "   W / Arrow Up       Move cursor up\n"
+                "   S / Arrow Down     Move cursor down\n"
+                "   ENTER              Select item\n"
+                "   ESC                Go back\n"
+                "  -----------------------------------------\n\n"
+                "  On the start screen, choose:\n"
+                "   1) Login    - if you already have an account\n"
+                "   2) Register - to create a new profile\n"
+                "   3) Offline  - without internet connection\n",
+
+                "  Bienvenue dans Valentino Game Collection!\n\n"
+                "  Ce guide vous montre les bases en 3 pages.\n"
+                "  Vous pouvez le passer a tout moment avec S.\n\n"
+                "  NAVIGATION DANS LES MENUS:\n"
+                "  -----------------------------------------\n"
+                "   W / Fleche haut    Monter le curseur\n"
+                "   S / Fleche bas     Descendre le curseur\n"
+                "   ENTREE             Selectionner\n"
+                "   ESC                Retour\n"
+                "  -----------------------------------------\n\n"
+                "  Sur l'ecran d'accueil, choisissez:\n"
+                "   1) Connexion  - si vous avez deja un compte\n"
+                "   2) S'inscrire - pour creer un nouveau profil\n"
+                "   3) Hors ligne - sans connexion internet\n"
+            }
+        },
+        {
+            {"I GIOCHI  (2/3)","THE GAMES  (2/3)","LES JEUX  (2/3)"},
+            {
+                "  HAI 3 GIOCHI A DISPOSIZIONE:\n\n"
+                "  1) INDOVINA IL NUMERO\n"
+                "     Trova il numero segreto nel minor numero\n"
+                "     di tentativi. Scegli la difficolta':\n"
+                "     Facile=1-20 / Medio=1-50 / Difficile=1-100\n\n"
+                "  2) SNAKE\n"
+                "     Mangia le mele (*) con il serpente.\n"
+                "     Controlla con WASD o frecce direzionali.\n"
+                "     Non toccare i muri ne' te stesso!\n\n"
+                "  3) DODGE GAME\n"
+                "     Schiva i blocchi (#) che cadono dall'alto.\n"
+                "     Muoviti con A/D o frecce sx/dx.\n"
+                "     Sopravvivi il piu' a lungo possibile!\n\n"
+                "  Ogni gioco ha 3 livelli di difficolta'.\n"
+                "  I tuoi record vengono salvati automaticamente.\n",
+
+                "  YOU HAVE 3 GAMES AVAILABLE:\n\n"
+                "  1) GUESS THE NUMBER\n"
+                "     Find the secret number in as few tries\n"
+                "     as possible. Pick a difficulty:\n"
+                "     Easy=1-20 / Medium=1-50 / Hard=1-100\n\n"
+                "  2) SNAKE\n"
+                "     Eat the apples (*) with your snake.\n"
+                "     Control with WASD or arrow keys.\n"
+                "     Avoid walls and your own tail!\n\n"
+                "  3) DODGE GAME\n"
+                "     Dodge the falling blocks (#).\n"
+                "     Move with A/D or left/right arrows.\n"
+                "     Survive as long as possible!\n\n"
+                "  Every game has 3 difficulty levels.\n"
+                "  Your records are saved automatically.\n",
+
+                "  VOUS AVEZ 3 JEUX DISPONIBLES:\n\n"
+                "  1) DEVINEZ LE NOMBRE\n"
+                "     Trouvez le nombre secret en un minimum\n"
+                "     d'essais. Choisissez la difficulte:\n"
+                "     Facile=1-20 / Moyen=1-50 / Difficile=1-100\n\n"
+                "  2) SNAKE\n"
+                "     Mangez les pommes (*) avec votre serpent.\n"
+                "     Controllez avec WASD ou les fleches.\n"
+                "     Evitez les murs et votre propre queue!\n\n"
+                "  3) DODGE GAME\n"
+                "     Esquivez les blocs (#) qui tombent.\n"
+                "     Deplacez-vous avec A/D ou fleches.\n"
+                "     Survivez le plus longtemps possible!\n\n"
+                "  Chaque jeu a 3 niveaux de difficulte.\n"
+                "  Vos records sont sauvegardes automatiquement.\n"
+            }
+        },
+        {
+            {"FUNZIONI ONLINE  (3/3)","ONLINE FEATURES  (3/3)","FONCTIONS EN LIGNE  (3/3)"},
+            {
+                "  FUNZIONALITA' ONLINE (richiede registrazione):\n\n"
+                "  LEADERBOARD  Classifica globale per ogni gioco.\n"
+                "               Vedi dove ti posizioni nel mondo!\n\n"
+                "  AMICI        Aggiungi amici per username e\n"
+                "               monitora i loro punteggi.\n\n"
+                "  SFIDE        Sfida un amico: chi batte il\n"
+                "               tuo record vince la sfida.\n\n"
+                "  TORNEI       Crea o unisciti a tornei.\n"
+                "               I tuoi punteggi vengono inviati\n"
+                "               automaticamente dopo ogni partita.\n"
+                "               Vince chi ha il totale piu' alto!\n\n"
+                "  ACHIEVEMENTS Sblocca oltre 21 traguardi speciali\n"
+                "               giocando e usando le funzioni social.\n\n"
+                "  Per rivedere questo tutorial: Impostazioni > Tutorial\n",
+
+                "  ONLINE FEATURES (requires registration):\n\n"
+                "  LEADERBOARD  Global ranking for each game.\n"
+                "               See where you rank worldwide!\n\n"
+                "  FRIENDS      Add friends by username and\n"
+                "               track their scores.\n\n"
+                "  CHALLENGES   Challenge a friend: whoever beats\n"
+                "               your record wins the challenge.\n\n"
+                "  TOURNAMENTS  Create or join tournaments.\n"
+                "               Your scores are sent automatically\n"
+                "               after every game.\n"
+                "               Highest total wins!\n\n"
+                "  ACHIEVEMENTS Unlock over 21 special milestones\n"
+                "               by playing and using social features.\n\n"
+                "  To replay this tutorial: Settings > Tutorial\n",
+
+                "  FONCTIONS EN LIGNE (necessite une inscription):\n\n"
+                "  CLASSEMENT   Classement mondial pour chaque jeu.\n"
+                "               Voyez votre rang dans le monde!\n\n"
+                "  AMIS         Ajoutez des amis par nom d'utilisateur\n"
+                "               et suivez leurs scores.\n\n"
+                "  DEFIS        Defiez un ami: celui qui bat votre\n"
+                "               record remporte le defi.\n\n"
+                "  TOURNOIS     Creez ou rejoignez des tournois.\n"
+                "               Vos scores sont envoyes automatiquement\n"
+                "               apres chaque partie.\n"
+                "               Le total le plus eleve gagne!\n\n"
+                "  SUCCES       Debloquez plus de 21 succes speciaux\n"
+                "               en jouant et utilisant les fonctions.\n\n"
+                "  Revoir ce tutoriel: Parametres > Tutoriel\n"
+            }
+        }
+    };
+
+    int nPages = 3;
+    for (int p = 0; p < nPages; p++) {
+        CLEAR_SCREEN();
+        setColor(11);
+        cout<<"\n  ====== "<<pages[p].title[lang]<<" ======\n\n";
+        resetColor();
+        setColor(7);
+        cout<<pages[p].body[lang];
+        resetColor();
+        cout<<"\n";
+        setColor(8);
+        if(p < nPages-1)
+            cout<<"  [S] Salta tutorial / Skip / Passer          INVIO: pagina successiva\n";
+        else
+            cout<<"  [S / INVIO] Fine tutorial\n";
+        resetColor();
+        cout<<"\n  > " << flush;
+
+        string inp; getline(cin, inp);
+        if (!inp.empty() && (inp[0]=='s' || inp[0]=='S')) break;
+    }
+    CLEAR_SCREEN();
+}
+
 void showSettings() {
     while(true) {
         disableRawMode(); CLEAR_SCREEN();
@@ -1291,7 +1480,8 @@ void showSettings() {
         setColor(7);
         cout<<"  4) "<<tr(T_CREDITS)<<"\n";
         cout<<"  5) "<<tr(T_SAVE_PROFILE)<<"\n";
-        cout<<"  6) "<<tr(T_BACK)<<"\n";
+        cout<<"  6) "<<tr(T_TUTORIAL)<<"\n";
+        cout<<"  7) "<<tr(T_BACK)<<"\n";
         resetColor();
 
         cout<<"\n> ";
@@ -1320,6 +1510,8 @@ void showSettings() {
             setColor(10); cout<<"\n  "<<tr(T_SAVED)<<"\n"; resetColor();
             PLATFORM_SLEEP(800);
         } else if (c==6) {
+            showTutorial();
+        } else if (c==7) {
             break;
         }
     }
@@ -1432,6 +1624,7 @@ bool doRegister() {
     setColor(10);cout<<"\nRegistrazione completata! Benvenuto, "<<g_playerName<<"!\n";resetColor();
     unlockAchievement("Verified");
     PLATFORM_SLEEP(1000);
+    showTutorial();
     return true;
 }
 
