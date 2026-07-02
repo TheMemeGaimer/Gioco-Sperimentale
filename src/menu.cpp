@@ -186,6 +186,7 @@ enum TKey {
     T_CREDITS_FOUNDER, T_CREDITS_THANKS, T_CREDITS_RIGHTS,
     T_CREDITS_TITLE,
     T_SETTINGS_TITLE,
+    T_TOURNAMENTS,
     T_STATS_TITLE, T_STATS_SNAKE_HIST, T_STATS_DODGE_HIST,
     T_STATS_INDOVINA_HIST, T_STATS_NO_DATA, T_STATS_SCORE, T_STATS_TIME,
     T_STATS_TRIES, T_STATS_BEST_RECORDS,
@@ -229,6 +230,7 @@ const char* TRANS[T_COUNT][3] = {
     {"(C) TMG Studio 2026. Tutti i Diritti Riservati.", "(C) TMG Studio 2026. All Rights Reserved.", "(C) TMG Studio 2026. Tous Droits Reserves."}, // T_CREDITS_RIGHTS
     {"====== CREDITI ======",                "====== CREDITS ======",              "====== CREDITS ======"},                // T_CREDITS_TITLE
     {"====== IMPOSTAZIONI ======",           "====== SETTINGS ======",             "====== PARAMETRES ======"},             // T_SETTINGS_TITLE
+    {"Tornei",                               "Tournaments",                        "Tournois"},                             // T_TOURNAMENTS (idx after T_SETTINGS_TITLE)
     {"====== STATISTICHE ======",            "====== STATISTICS ======",           "====== STATISTIQUES ======"},           // T_STATS_TITLE
     {"Storico Snake (ultimi 10)",            "Snake History (last 10)",            "Historique Snake (10 derniers)"},       // T_STATS_SNAKE_HIST
     {"Storico Dodge (ultimi 10)",            "Dodge History (last 10)",            "Historique Dodge (10 derniers)"},       // T_STATS_DODGE_HIST
@@ -558,6 +560,23 @@ void checkNotifications() {
     if (!g_onlineMode||g_authToken.empty()) return;
     string resp=httpGet(g_backendUrl+"/api/notifications",g_authToken);
     g_unreadNotifs=jsonInt(resp,"unread");
+}
+
+// ============================================================
+// AUTO-SUBMIT SCORE AI TORNEI ATTIVI
+// ============================================================
+void submitToTournaments(const string& game, int score) {
+    if (!g_onlineMode||g_authToken.empty()||score<=0) return;
+    string body="{\"tournament_id\":0,\"game\":\""+game+"\",\"score\":"+to_string(score)+"}";
+    string resp=httpPost(g_backendUrl+"/api/tournament/submit",body,g_authToken);
+    int n=jsonInt(resp,"updated_tournaments");
+    if(n>0){
+        disableRawMode();
+        setColor(10);
+        cout<<"  [Torneo] Score "<<score<<" inviato a "<<n<<" torneo/i!\n";
+        resetColor();
+        PLATFORM_SLEEP(700);
+    }
 }
 
 void showNotifications() {
@@ -1016,6 +1035,237 @@ void showCredits() {
 }
 
 // ============================================================
+// TORNEI
+// ============================================================
+void showTournaments() {
+    disableRawMode(); CLEAR_SCREEN();
+    if (!g_onlineMode) { cout<<"\n"<<tr(T_ONLINE_ONLY)<<"\n"; waitKey(); return; }
+
+    setColor(13);
+    cout<<"  ========================================\n";
+    cout<<"  ====== "<<tr(T_TOURNAMENTS)<<" - TMG Studio ======\n";
+    cout<<"  ========================================\n\n";
+    resetColor();
+
+    // Carica lista tornei attivi
+    string resp = httpGet(g_backendUrl+"/api/tournament/list", g_authToken);
+    bool hasTournaments = resp.find("\"tournaments\":[{") != string::npos;
+
+    // Visualizza tornei attivi
+    if (hasTournaments) {
+        setColor(11); cout<<"  --- Tuoi tornei attivi ---\n"; resetColor();
+        size_t tp = resp.find("\"tournaments\":[");
+        string tb = resp.substr(tp+15);
+        int idx=1;
+        size_t p=0;
+        while (p<tb.size()&&tb[p]!=']'&&idx<=10) {
+            // Parse fields
+            size_t idp=tb.find("\"id\":",p);
+            size_t np=tb.find("\"name\":\"",p);
+            size_t sp=tb.find("\"status\":\"",p);
+            size_t pp2=tb.find("\"participant_count\":",p);
+            size_t rp=tb.find("\"my_rank\":",p);
+            size_t tpp=tb.find("\"total_players\":",p);
+            size_t icp=tb.find("\"is_creator\":",p);
+            if(idp==string::npos||np==string::npos) break;
+            idp+=5; size_t ide=tb.find_first_of(",}",idp);
+            np+=8;  size_t ne=tb.find('"',np);
+            sp+=10; size_t se=tb.find('"',sp);
+            if(ide==string::npos||ne==string::npos) break;
+            int tid=stoi(tb.substr(idp,ide-idp));
+            string tname=tb.substr(np,ne-np);
+            string status=(sp<string::npos&&se<string::npos)?tb.substr(sp,se-sp):"?";
+            int parts=(pp2!=string::npos)?jsonInt(tb.substr(pp2-p),"participant_count"):0;
+            int rank=(rp!=string::npos)?jsonInt(tb.substr(rp-p),"my_rank"):0;
+            int totpl=(tpp!=string::npos)?jsonInt(tb.substr(tpp-p),"total_players"):0;
+            bool is_creator=(icp!=string::npos)&&tb.substr(icp+13,4)=="true";
+
+            if(status=="active") setColor(10); else setColor(8);
+            cout<<"  "<<idx<<") [#"<<tid<<"] \""<<tname<<"\"";
+            if(is_creator) { setColor(14); cout<<" [CREATOR]"; }
+            setColor(7); cout<<" | "<<parts<<" giocatori";
+            if(rank>0) { cout<<" | Pos: "; setColor(14); cout<<"#"<<rank<<"/"<<totpl; setColor(7); }
+            cout<<"\n";
+            resetColor();
+            p=ne; idx++;
+        }
+        cout<<"\n";
+    } else {
+        setColor(8); cout<<"  Nessun torneo attivo.\n\n"; resetColor();
+    }
+
+    // Azioni
+    setColor(7);
+    cout<<"  1) Crea nuovo torneo\n";
+    cout<<"  2) Classifica torneo (inserisci ID)\n";
+    cout<<"  3) Unisciti a torneo (inserisci ID)\n";
+    cout<<"  4) Chiudi torneo (solo creator)\n";
+    cout<<"  5) "<<tr(T_BACK)<<"\n";
+    resetColor();
+    cout<<"\n  > ";
+    int c; if(!(cin>>c)){cin.clear();cin.ignore(9999,'\n');c=5;} else cin.ignore(9999,'\n');
+
+    if (c==1) {
+        // Crea torneo
+        CLEAR_SCREEN();
+        setColor(13); cout<<"-- Crea Torneo --\n\n"; resetColor();
+        cout<<"Nome torneo: "; string tname; getline(cin,tname);
+        if(tname.empty()) return;
+
+        cout<<"Giochi da includere:\n";
+        cout<<"  1=Snake  2=Dodge  3=Indovina\n";
+        cout<<"Inserisci numeri separati da spazio (es: 1 2): ";
+        string line; getline(cin,line);
+        string gamesJson="[";
+        if(line.find('1')!=string::npos) gamesJson+="\"snake\",";
+        if(line.find('2')!=string::npos) gamesJson+="\"dodge\",";
+        if(line.find('3')!=string::npos) gamesJson+="\"indovina\",";
+        if(gamesJson.back()==',') gamesJson.pop_back();
+        gamesJson+="]";
+        if(gamesJson=="[]"){setColor(12);cout<<"Nessun gioco selezionato.\n";resetColor();waitKey();return;}
+
+        cout<<"Durata in ore (1-720, default 24): ";
+        string hline; getline(cin,hline);
+        int hours=24; try{if(!hline.empty())hours=stoi(hline);}catch(...){}
+        hours=max(1,min(720,hours));
+
+        cout<<"Invita amici (username separati da virgola, oppure vuoto): ";
+        string invline; getline(cin,invline);
+        string invJson="[";
+        if(!invline.empty()){
+            size_t pos=0;
+            while(pos<invline.size()){
+                size_t comma=invline.find(',',pos);
+                if(comma==string::npos) comma=invline.size();
+                string nm=invline.substr(pos,comma-pos);
+                while(!nm.empty()&&nm.front()==' ') nm.erase(nm.begin());
+                while(!nm.empty()&&nm.back()==' ') nm.pop_back();
+                if(!nm.empty()) invJson+="\""+nm+"\",";
+                pos=comma+1;
+            }
+            if(invJson.back()==',') invJson.pop_back();
+        }
+        invJson+="]";
+
+        string body="{\"name\":\""+tname+"\",\"games\":"+gamesJson+",\"deadline_hours\":"+to_string(hours)+",\"invites\":"+invJson+"}";
+        string r2=httpPost(g_backendUrl+"/api/tournament/create",body,g_authToken);
+        string msg=jsonStr(r2,"message");
+        setColor(jsonBool(r2,"success")?10:12); cout<<"\n"<<(msg.empty()?"Errore":msg)<<"\n"; resetColor();
+        if(jsonBool(r2,"success")){
+            int tid=jsonInt(r2,"tournament_id");
+            setColor(14); cout<<"  ID Torneo: #"<<tid<<" (condividilo con gli amici)\n"; resetColor();
+        }
+        waitKey();
+
+    } else if (c==2) {
+        // Classifica
+        cout<<"ID torneo: "; int tid; if(!(cin>>tid)){cin.ignore(9999,'\n');return;} cin.ignore(9999,'\n');
+        string r2=httpGet(g_backendUrl+"/api/tournament/"+to_string(tid)+"/standings",g_authToken);
+        if(!jsonBool(r2,"success")){
+            string msg=jsonStr(r2,"message");
+            setColor(12);cout<<(msg.empty()?"Errore":msg)<<"\n";resetColor();waitKey();return;
+        }
+        CLEAR_SCREEN();
+        // Nome torneo
+        size_t tnp=r2.find("\"name\":\""); if(tnp!=string::npos){tnp+=8;size_t tne=r2.find('"',tnp);
+            setColor(13);cout<<"\n  === TORNEO: "<<r2.substr(tnp,tne-tnp)<<" ===\n\n";resetColor();}
+
+        // Tempo rimanente
+        int hl=jsonInt(r2,"hours_left"), ml=jsonInt(r2,"mins_left");
+        setColor(8);
+        if(hl>0||ml>0) cout<<"  Scade tra: "<<hl<<"h "<<ml<<"m\n\n";
+        else cout<<"  SCADUTO\n\n";
+        resetColor();
+
+        // Standings
+        setColor(14); cout<<"  RANK  GIOCATORE        TOTALE\n"; resetColor();
+        setColor(8);  cout<<"  ----  ---------------  ------\n"; resetColor();
+        size_t stp=r2.find("\"standings\":[");
+        if(stp!=string::npos){
+            string sb=r2.substr(stp+13);
+            int rank=1; size_t p=0;
+            while(p<sb.size()&&sb[p]!=']'&&rank<=20){
+                size_t unp=sb.find("\"username\":\"",p);
+                size_t totpos=sb.find("\"total\":",p);
+                if(unp==string::npos||totpos==string::npos) break;
+                unp+=12; size_t une=sb.find('"',unp);
+                totpos+=8; size_t tote=sb.find_first_of(",}",totpos);
+                if(une==string::npos||tote==string::npos) break;
+                string uname=sb.substr(unp,une-unp);
+                int tot=stoi(sb.substr(totpos,tote-totpos));
+                bool isMe=(uname==g_playerName);
+                if(rank==1)      setColor(14);
+                else if(rank==2) setColor(7);
+                else if(rank==3) setColor(6);
+                else             setColor(8);
+                cout<<"  #"<<rank<<"   ";
+                cout<<uname<<string(max(1,15-(int)uname.size()),' ');
+                cout<<"  "<<tot<<" pt";
+                if(isMe){setColor(10);cout<<"  <-- Tu";}
+                cout<<"\n"; resetColor();
+                p=une; rank++;
+            }
+        }
+        cout<<"\n";
+        waitKey();
+
+    } else if (c==3) {
+        // Unisciti
+        cout<<"ID torneo: "; int tid; if(!(cin>>tid)){cin.ignore(9999,'\n');return;} cin.ignore(9999,'\n');
+        string body="{\"tournament_id\":"+to_string(tid)+"}";
+        string r2=httpPost(g_backendUrl+"/api/tournament/join",body,g_authToken);
+        string msg=jsonStr(r2,"message");
+        setColor(jsonBool(r2,"success")?10:12); cout<<(msg.empty()?"Errore":msg)<<"\n"; resetColor();
+        waitKey();
+
+    } else if (c==4) {
+        // Chiudi torneo
+        cout<<"ID torneo da chiudere: "; int tid; if(!(cin>>tid)){cin.ignore(9999,'\n');return;} cin.ignore(9999,'\n');
+        string body="{\"tournament_id\":"+to_string(tid)+"}";
+        string r2=httpPost(g_backendUrl+"/api/tournament/close",body,g_authToken);
+        if(!jsonBool(r2,"success")){
+            string msg=jsonStr(r2,"message");
+            setColor(12);cout<<(msg.empty()?"Errore":msg)<<"\n";resetColor();waitKey();return;
+        }
+        CLEAR_SCREEN();
+        setColor(14);
+        cout<<"\n  +---------------------------------+\n";
+        cout<<"  |      TORNEO CONCLUSO!           |\n";
+        cout<<"  |                                 |\n";
+        string winner=jsonStr(r2,"winner");
+        int pad=max(0,(int)(29-(int)winner.size())/2);
+        cout<<"  |"<<string(pad,' ')<<"VINCITORE: "<<winner<<string(29-pad-(int)winner.size()-10,' ')<<"|\n";
+        cout<<"  |                                 |\n";
+        cout<<"  +---------------------------------+\n\n";
+        resetColor();
+
+        // Mostra standings finali
+        size_t stp=r2.find("\"standings\":[");
+        if(stp!=string::npos){
+            setColor(11); cout<<"  Classifica finale:\n"; resetColor();
+            string sb=r2.substr(stp+13);
+            int rank=1; size_t p=0;
+            while(p<sb.size()&&sb[p]!=']'&&rank<=10){
+                size_t unp=sb.find("\"username\":\"",p);
+                size_t totpos=sb.find("\"total\":",p);
+                if(unp==string::npos||totpos==string::npos) break;
+                unp+=12; size_t une=sb.find('"',unp);
+                totpos+=8; size_t tote=sb.find_first_of(",}",totpos);
+                if(une==string::npos||tote==string::npos) break;
+                string uname=sb.substr(unp,une-unp);
+                int tot=stoi(sb.substr(totpos,tote-totpos));
+                if(rank==1) setColor(14);
+                else        setColor(8);
+                cout<<"  #"<<rank<<" "<<uname<<" — "<<tot<<" pt\n";
+                resetColor();
+                p=une; rank++;
+            }
+        }
+        waitKey();
+    }
+}
+
+// ============================================================
 // IMPOSTAZIONI
 // ============================================================
 void showSettings() {
@@ -1319,6 +1569,7 @@ void miniGiocoIndovina(const string& nome, int diff) {
             g_vittorieConsecutive++;
             if(g_vittorieConsecutive>=3) unlockAchievement("Persistence");
             addToHistory(g_indovinaHistory, tentativi);
+            submitToTournaments("indovina", tentativi);
             saveProfile();
         }
     } while(t!=segreto);
@@ -1373,6 +1624,7 @@ void giocoSnake(const string& nome, int diff) {
     if(score>=30) unlockAchievement("Snake Survivor");
     if(score>=50) unlockAchievement("Snake Master");
     addToHistory(g_snakeHistory, score);
+    submitToTournaments("snake", score);
     saveProfile(); waitKey();
 }
 
@@ -1417,6 +1669,7 @@ void giocoDodge(const string& nome, int diff) {
     if(survived>=40) unlockAchievement("Ultra Dodger");
     if(survived>=60) unlockAchievement("Untouchable");
     addToHistory(g_dodgeHistory, survived);
+    submitToTournaments("dodge", survived);
     saveProfile(); waitKey();
 }
 
@@ -1443,7 +1696,7 @@ int matrixMenu(const string& nome) {
     for(int i=0;i<WIDTH;i++){headY[i]=rand()%HEIGHT;speed[i]=1+rand()%3;}
     string secretInput,codeInput;
     int sel=0;
-    const int N=11;
+    const int N=12;
     string opts[N];
     auto refreshOpts=[&](){
         opts[0]  = tr(T_GUESS_GAME);
@@ -1455,8 +1708,9 @@ int matrixMenu(const string& nome) {
         opts[6]  = tr(T_CHALLENGES);
         opts[7]  = tr(T_NOTIFICATIONS);
         opts[8]  = tr(T_STATS);
-        opts[9]  = tr(T_SETTINGS);
-        opts[10] = tr(T_QUIT);
+        opts[9]  = tr(T_TOURNAMENTS);
+        opts[10] = tr(T_SETTINGS);
+        opts[11] = tr(T_QUIT);
     };
     refreshOpts();
     CLEAR_SCREEN();
@@ -1570,8 +1824,9 @@ int main() {
         else if(scelta==7)  {showChallenges();}
         else if(scelta==8)  {showNotifications();}
         else if(scelta==9)  {showStats();}
-        else if(scelta==10) {showSettings();}
-    } while(scelta!=11);
+        else if(scelta==10) {showTournaments();}
+        else if(scelta==11) {showSettings();}
+    } while(scelta!=12);
 
     saveProfile();
     CLEAR_SCREEN();

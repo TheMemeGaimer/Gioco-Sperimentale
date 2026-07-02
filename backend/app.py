@@ -78,6 +78,37 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS tournaments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            creator_id INTEGER NOT NULL,
+            games TEXT NOT NULL,
+            status TEXT DEFAULT 'open',
+            deadline TEXT,
+            winner_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(creator_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS tournament_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tournament_id, user_id),
+            FOREIGN KEY(tournament_id) REFERENCES tournaments(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS tournament_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            game TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tournament_id, user_id, game),
+            FOREIGN KEY(tournament_id) REFERENCES tournaments(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
     ''')
     conn.commit()
     conn.close()
@@ -119,15 +150,64 @@ def send_email(to_addr, subject, body_text, body_html=None):
         print(f"[EMAIL ERROR] {e}")
         return False
 
+def calc_game_pts(game, score):
+    """Converti raw score in punti torneo normalizzati."""
+    if game == 'snake':
+        return score
+    elif game == 'dodge':
+        return score
+    elif game == 'indovina':
+        return max(0, 11 - score)  # 1 tentativo = 10pt, 10 tentativi = 1pt
+    return 0
+
+def get_tournament_standings(conn, tournament_id):
+    """Restituisce classifica completa di un torneo."""
+    t = conn.execute('SELECT * FROM tournaments WHERE id=?', (tournament_id,)).fetchone()
+    if not t:
+        return []
+    games = json.loads(t['games'])
+
+    participants = conn.execute(
+        'SELECT tp.user_id, u.username FROM tournament_participants tp JOIN users u ON u.id=tp.user_id WHERE tp.tournament_id=?',
+        (tournament_id,)
+    ).fetchall()
+
+    standings = []
+    for p in participants:
+        uid = p['user_id']
+        total = 0
+        game_scores = {}
+        for g in games:
+            row = conn.execute(
+                'SELECT score FROM tournament_scores WHERE tournament_id=? AND user_id=? AND game=?',
+                (tournament_id, uid, g)
+            ).fetchone()
+            if row:
+                raw = row['score']
+                pts = calc_game_pts(g, raw)
+                game_scores[g] = {'raw': raw, 'pts': pts}
+                total += pts
+            else:
+                game_scores[g] = {'raw': None, 'pts': 0}
+        standings.append({
+            'user_id': uid,
+            'username': p['username'],
+            'total': total,
+            'games': game_scores
+        })
+
+    standings.sort(key=lambda x: x['total'], reverse=True)
+    return standings
+
 # ============================================================
 # PING
 # ============================================================
 @app.route('/api/ping', methods=['GET'])
 def ping():
-    return jsonify({'status': 'ok', 'version': '2.0'})
+    return jsonify({'status': 'ok', 'version': '3.0'})
 
 # ============================================================
-# VERIFICA EMAIL — Invia codice
+# VERIFICA EMAIL
 # ============================================================
 @app.route('/api/send-verification', methods=['POST'])
 def send_verification():
@@ -292,7 +372,6 @@ def save_profile():
         (user['id'], json.dumps(data), datetime.now().isoformat())
     )
 
-    # Controlla sfide completate
     snake_score = data.get('snakeBestScore', 0)
     dodge_time  = data.get('dodgeBestTime', 0)
     challenges  = conn.execute(
@@ -421,7 +500,7 @@ def friend_respond():
 
     data   = request.get_json(silent=True) or {}
     req_id = data.get('friendship_id')
-    action = data.get('action', '')  # 'accept' o 'decline'
+    action = data.get('action', '')
 
     conn = get_db()
     fs   = conn.execute(
@@ -471,7 +550,6 @@ def friends_list():
     pending  = []
     for r in rows:
         if r['status'] == 'accepted':
-            # Ottieni il miglior score dell'amico
             prow = conn.execute('SELECT profile_data FROM profiles WHERE user_id=?', (r['friend_id'],)).fetchone()
             friend_data = {}
             if prow and prow['profile_data']:
@@ -501,7 +579,7 @@ def send_challenge():
 
     data        = request.get_json(silent=True) or {}
     friend_name = data.get('username', '').strip()
-    game        = data.get('game', '').strip()       # snake / dodge
+    game        = data.get('game', '').strip()
     target      = data.get('target', 0)
 
     if game not in ('snake', 'dodge') or target <= 0:
@@ -541,7 +619,7 @@ def respond_challenge():
 
     data      = request.get_json(silent=True) or {}
     ch_id     = data.get('challenge_id')
-    action    = data.get('action', '')  # 'accept' o 'decline'
+    action    = data.get('action', '')
 
     conn = get_db()
     ch   = conn.execute(
@@ -631,9 +709,324 @@ def get_notifications():
                'read': bool(r['read']), 'created_at': r['created_at']} for r in rows]
     return jsonify({'success': True, 'notifications': notifs, 'unread': unread})
 
+# ============================================================
+# TORNEI
+# ============================================================
+@app.route('/api/tournament/create', methods=['POST'])
+def tournament_create():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    data          = request.get_json(silent=True) or {}
+    name          = data.get('name', '').strip()
+    games         = data.get('games', [])
+    deadline_h    = int(data.get('deadline_hours', 24))
+    invite_names  = data.get('invites', [])  # lista di username amici
+
+    if not name:
+        return jsonify({'success': False, 'message': 'Nome torneo richiesto'}), 400
+    valid_games = [g for g in games if g in ('snake', 'dodge', 'indovina')]
+    if not valid_games:
+        return jsonify({'success': False, 'message': 'Seleziona almeno un gioco'}), 400
+    deadline_h = max(1, min(720, deadline_h))
+    deadline   = (datetime.now() + timedelta(hours=deadline_h)).isoformat()
+
+    conn = get_db()
+    cursor = conn.execute(
+        'INSERT INTO tournaments (name, creator_id, games, status, deadline) VALUES (?,?,?,?,?)',
+        (name, user['id'], json.dumps(valid_games), 'active', deadline)
+    )
+    tid = cursor.lastrowid
+
+    # Creator partecipa automaticamente
+    conn.execute('INSERT INTO tournament_participants (tournament_id, user_id) VALUES (?,?)',
+                 (tid, user['id']))
+
+    # Invita gli amici
+    invited = []
+    for uname in invite_names:
+        friend = conn.execute('SELECT id FROM users WHERE username=?', (uname,)).fetchone()
+        if not friend:
+            continue
+        fs = conn.execute(
+            "SELECT * FROM friendships WHERE status='accepted' AND ((requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?))",
+            (user['id'], friend['id'], friend['id'], user['id'])
+        ).fetchone()
+        if fs:
+            try:
+                conn.execute('INSERT INTO tournament_participants (tournament_id, user_id) VALUES (?,?)',
+                             (tid, friend['id']))
+                games_str = ', '.join(g.upper() for g in valid_games)
+                add_notification(conn, friend['id'],
+                    f'{user["username"]} ti ha invitato al torneo "{name}" [{games_str}]! Scade tra {deadline_h}h.',
+                    'tournament')
+                invited.append(uname)
+            except Exception:
+                pass
+
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'success': True,
+        'tournament_id': tid,
+        'message': f'Torneo "{name}" creato! Invitati: {len(invited)} amici.',
+        'invited': invited
+    })
+
+@app.route('/api/tournament/join', methods=['POST'])
+def tournament_join():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    data = request.get_json(silent=True) or {}
+    tid  = data.get('tournament_id')
+
+    conn = get_db()
+    t = conn.execute(
+        "SELECT * FROM tournaments WHERE id=? AND status='active' AND deadline > ?",
+        (tid, datetime.now().isoformat())
+    ).fetchone()
+    if not t:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Torneo non trovato o scaduto'}), 404
+
+    try:
+        conn.execute('INSERT INTO tournament_participants (tournament_id, user_id) VALUES (?,?)',
+                     (tid, user['id']))
+        creator = conn.execute('SELECT username FROM users WHERE id=?', (t['creator_id'],)).fetchone()
+        add_notification(conn, t['creator_id'],
+            f'{user["username"]} si e\' unito al tuo torneo "{t["name"]}"!', 'tournament')
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': f'Sei entrato nel torneo "{t["name"]}"!'})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Sei gia in questo torneo'}), 400
+
+@app.route('/api/tournament/list', methods=['GET'])
+def tournament_list():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    conn = get_db()
+    rows = conn.execute('''
+        SELECT t.*, u.username AS creator_name,
+               (SELECT COUNT(*) FROM tournament_participants WHERE tournament_id=t.id) AS participant_count
+        FROM tournaments t
+        JOIN users u ON u.id = t.creator_id
+        JOIN tournament_participants tp ON tp.tournament_id = t.id AND tp.user_id = ?
+        WHERE t.status IN ('active','completed')
+        ORDER BY t.created_at DESC
+        LIMIT 10
+    ''', (user['id'],)).fetchall()
+
+    result = []
+    for r in rows:
+        # Punteggio personale
+        games = json.loads(r['games'])
+        my_scores = {}
+        for g in games:
+            sr = conn.execute(
+                'SELECT score FROM tournament_scores WHERE tournament_id=? AND user_id=? AND game=?',
+                (r['id'], user['id'], g)
+            ).fetchone()
+            my_scores[g] = sr['score'] if sr else None
+
+        # Posizione in classifica
+        standings = get_tournament_standings(conn, r['id'])
+        my_rank = next((i+1 for i,s in enumerate(standings) if s['user_id']==user['id']), 0)
+
+        result.append({
+            'id': r['id'],
+            'name': r['name'],
+            'creator': r['creator_name'],
+            'is_creator': r['creator_id'] == user['id'],
+            'games': games,
+            'status': r['status'],
+            'deadline': r['deadline'],
+            'participant_count': r['participant_count'],
+            'my_scores': my_scores,
+            'my_rank': my_rank,
+            'total_players': len(standings)
+        })
+
+    conn.close()
+    return jsonify({'success': True, 'tournaments': result})
+
+@app.route('/api/tournament/submit', methods=['POST'])
+def tournament_submit():
+    """Sottomette uno score ad un torneo specifico (o a tutti se tournament_id=0)."""
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    data  = request.get_json(silent=True) or {}
+    tid   = data.get('tournament_id', 0)
+    game  = data.get('game', '').strip()
+    score = int(data.get('score', 0))
+
+    if game not in ('snake', 'dodge', 'indovina') or score < 0:
+        return jsonify({'success': False, 'message': 'Dati non validi'}), 400
+
+    conn  = get_db()
+    now   = datetime.now().isoformat()
+    updated = 0
+
+    if tid == 0:
+        # Sottometti a tutti i tornei attivi dell'utente che includono questo gioco
+        rows = conn.execute('''
+            SELECT t.id, t.games FROM tournaments t
+            JOIN tournament_participants tp ON tp.tournament_id=t.id AND tp.user_id=?
+            WHERE t.status='active' AND t.deadline > ?
+        ''', (user['id'], now)).fetchall()
+        targets = [(r['id'], json.loads(r['games'])) for r in rows if game in json.loads(r['games'])]
+    else:
+        row = conn.execute(
+            "SELECT t.id, t.games FROM tournaments t JOIN tournament_participants tp ON tp.tournament_id=t.id AND tp.user_id=? WHERE t.id=? AND t.status='active' AND t.deadline>?",
+            (user['id'], tid, now)
+        ).fetchone()
+        targets = [(row['id'], json.loads(row['games'])) for row in [row] if row and game in json.loads(row['games'])]
+
+    for t_id, _ in targets:
+        existing = conn.execute(
+            'SELECT score FROM tournament_scores WHERE tournament_id=? AND user_id=? AND game=?',
+            (t_id, user['id'], game)
+        ).fetchone()
+        if existing:
+            # Aggiorna solo se migliore
+            is_better = False
+            if game in ('snake', 'dodge') and score > existing['score']:
+                is_better = True
+            elif game == 'indovina' and score < existing['score']:
+                is_better = True
+            if is_better:
+                conn.execute(
+                    'UPDATE tournament_scores SET score=?, submitted_at=? WHERE tournament_id=? AND user_id=? AND game=?',
+                    (score, now, t_id, user['id'], game)
+                )
+                updated += 1
+        else:
+            conn.execute(
+                'INSERT INTO tournament_scores (tournament_id, user_id, game, score, submitted_at) VALUES (?,?,?,?,?)',
+                (t_id, user['id'], game, score, now)
+            )
+            updated += 1
+
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'updated_tournaments': updated,
+                    'message': f'Score inviato a {updated} torneo/i.'})
+
+@app.route('/api/tournament/<int:tid>/standings', methods=['GET'])
+def tournament_standings(tid):
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    conn = get_db()
+    t = conn.execute('SELECT * FROM tournaments WHERE id=?', (tid,)).fetchone()
+    if not t:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Torneo non trovato'}), 404
+
+    # Verifica partecipazione
+    part = conn.execute(
+        'SELECT id FROM tournament_participants WHERE tournament_id=? AND user_id=?',
+        (tid, user['id'])
+    ).fetchone()
+    if not part:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Non partecipi a questo torneo'}), 403
+
+    standings = get_tournament_standings(conn, tid)
+    games     = json.loads(t['games'])
+
+    # Calcola scadenza rimanente
+    try:
+        deadline_dt = datetime.fromisoformat(t['deadline'])
+        remaining   = max(0, int((deadline_dt - datetime.now()).total_seconds()))
+        hours_left  = remaining // 3600
+        mins_left   = (remaining % 3600) // 60
+    except Exception:
+        hours_left  = 0
+        mins_left   = 0
+
+    conn.close()
+    return jsonify({
+        'success': True,
+        'tournament': {
+            'id': t['id'],
+            'name': t['name'],
+            'games': games,
+            'status': t['status'],
+            'deadline': t['deadline'],
+            'hours_left': hours_left,
+            'mins_left': mins_left,
+        },
+        'standings': standings
+    })
+
+@app.route('/api/tournament/close', methods=['POST'])
+def tournament_close():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    user  = get_user_by_token(token)
+    if not user:
+        return jsonify({'success': False, 'message': 'Non autorizzato'}), 401
+
+    data = request.get_json(silent=True) or {}
+    tid  = data.get('tournament_id')
+
+    conn = get_db()
+    t = conn.execute(
+        "SELECT * FROM tournaments WHERE id=? AND creator_id=? AND status='active'",
+        (tid, user['id'])
+    ).fetchone()
+    if not t:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Torneo non trovato o non sei il creatore'}), 404
+
+    standings = get_tournament_standings(conn, tid)
+    winner_id = None
+    winner_name = 'Nessuno'
+    if standings:
+        winner_id   = standings[0]['user_id']
+        winner_name = standings[0]['username']
+
+    conn.execute("UPDATE tournaments SET status='completed', winner_id=? WHERE id=?",
+                 (winner_id, tid))
+
+    # Notifica tutti i partecipanti
+    parts = conn.execute(
+        'SELECT user_id FROM tournament_participants WHERE tournament_id=?', (tid,)
+    ).fetchall()
+    for p in parts:
+        if p['user_id'] == winner_id:
+            add_notification(conn, p['user_id'],
+                f'Hai VINTO il torneo "{t["name"]}"! Congratulazioni!', 'tournament_win')
+        else:
+            add_notification(conn, p['user_id'],
+                f'Il torneo "{t["name"]}" e\' terminato. Vincitore: {winner_name}!', 'tournament_end')
+
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'success': True,
+        'winner': winner_name,
+        'standings': standings,
+        'message': f'Torneo concluso! Vincitore: {winner_name}'
+    })
+
 if __name__ == '__main__':
     init_db()
-    print("=== VGC Backend Server v2.0 ===")
+    print("=== VGC Backend Server v3.0 ===")
     print(f"Database: {DB_PATH}")
     print(f"Email: {EMAIL_USER or '(non configurata)'}")
     print("Server: http://localhost:8000")
